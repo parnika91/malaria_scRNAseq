@@ -1,0 +1,212 @@
+---
+title: "Remove background Plasmo reads"
+output:
+  html_document:
+    keep_md: true
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+  pdf_document:
+    keep_md: true
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: kable
+always_allow_html: true
+---
+
+
+```{r setup, include=T} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(fig.width = 10, fig.height = 8) 
+```
+
+```{r}
+library(Seurat)
+library(patchwork)
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+library(broom)
+library(stringr)
+library(ggplot2)
+library(SeuratData)
+#library(celldex)
+#install.packages("cowplot")
+library(cowplot)
+#devtools::install_github('cole-trapnell-lab/monocle3')
+library(monocle3)
+#remotes::install_github('satijalab/seurat-wrappers')
+library(SeuratWrappers)
+#BiocManager::install('multtest', force = T)
+library(multtest)
+library(RColorBrewer)
+# install.packages('metap')
+#library(metap)
+#remotes::install_github("satijalab/seurat-data")
+
+```
+
+
+<!-- ```{r} -->
+
+<!-- # EXP1_l2 <- readRDS("Jan27analysis/EXP1_l2_res0.9.rds") -->
+<!-- # EXP2_l1 <- readRDS("Jan27analysis/EXP2_l1_res0.9.rds") -->
+<!-- # EXP2_l2 <- readRDS("Jan27analysis/EXP2_l2_res0.9.rds") -->
+<!-- # EXP2_l3 <- readRDS("Jan27analysis/EXP2_l3_res0.9.rds") -->
+<!-- file_1_l1 = list.files("robjects/",pattern = "^dual_EXP1_l1.*\\_cellbender.rds$") -->
+<!-- file_1_l2 = list.files("robjects/",pattern = "^dual_EXP1_l2.*\\_cellbender.rds$") -->
+<!-- file_2_l1 = list.files("robjects/",pattern = "^dual_EXP2_l1.*\\_cellbender.rds$") -->
+<!-- file_2_l2 = list.files("robjects/",pattern = "^dual_EXP2_l2_reseq.*\\_cellbender.rds$") -->
+<!-- file_2_l3 = list.files("robjects/",pattern = "^dual_EXP2_l3.*\\_cellbender.rds$") -->
+
+<!-- EXP1_l1 <- readRDS(paste0("robjects/",file_1_l1)) -->
+<!-- EXP1_l2 <- readRDS(paste0("robjects/",file_1_l2)) -->
+<!-- EXP2_l1 <- readRDS(paste0("robjects/",file_2_l1)) -->
+<!-- EXP2_l2 <- readRDS(paste0("robjects/",file_2_l2)) -->
+<!-- EXP2_l3 <- readRDS(paste0("robjects/",file_2_l3)) -->
+<!-- ``` -->
+
+```{r}
+# function to remove plasmo genes from each library
+remove_plasmo_bg <- function(lib_name)
+{
+  # get cells that belong to control and RBC_control
+  # seurat.subset <- subset(x = epithelial, subset = (stim == "Healthy" & stim == "Others") & (another_condition == "Ambigious"))
+  cells_in_ctrl_conditions <- subset(lib_name, subset = Group == c("control","RBC_control"))
+  
+  # get the plasmo genes that are expressed in these conditions
+  plasmo.genes.id <- grep(pattern = "gene-PF3D7", rownames(cells_in_ctrl_conditions))
+  plasmo.obj <- cells_in_ctrl_conditions[plasmo.genes.id,]
+  
+  which.plasmo.genes.are.exp <- plasmo.obj[which(rowSums(plasmo.obj) > 0),]
+  exp.plasmo.genes <- rownames(which.plasmo.genes.are.exp)
+
+  # get 99th percentile of these genes
+  pc99 = apply(which.plasmo.genes.are.exp[["RNA"]]@data,1,quantile,0.99)
+  
+  # remove these from all cells in the main lib + min expr to 0
+  for(i in 1:length(pc99))
+  {
+    exp.plasmo.gene.index <- grep(rownames(lib_name), pattern = names(pc99)[i])
+    lib_name[["RNA"]]@data[exp.plasmo.gene.index,] <- lib_name[["RNA"]]@data[exp.plasmo.gene.index,] - pc99[i]
+    if(any(lib_name[["RNA"]]@data[exp.plasmo.gene.index,] < 0))
+      lib_name[["RNA"]]@data[exp.plasmo.gene.index,
+                             which(lib_name[["RNA"]]@data[exp.plasmo.gene.index,] < 0)] <- 0
+  }
+  
+  return(lib_name)
+}
+```
+
+<!-- ```{r} -->
+<!-- # EXP1_l1 remove bg genes -->
+<!-- EXP1_l1_remove_bg <- remove_plasmo_bg(lib_name = EXP1_l1) -->
+
+<!-- plasmo.genes.id <- grep(pattern = "gene-PF3D7", rownames(EXP1_l1_remove_bg)) -->
+
+<!-- EXP1_l1_remove_bg[["percent.plasmo"]] <- PercentageFeatureSet(EXP1_l1_remove_bg, pattern="^gene-PF3D7-") -->
+
+<!-- ggplot(EXP1_l1_remove_bg@meta.data, aes(x = percent.plasmo)) +  -->
+<!--   geom_histogram(binwidth = 1) + -->
+<!--   facet_wrap( ~ donor_id) -->
+
+<!-- range(EXP1_l1_remove_bg$percent.plasmo) -->
+
+<!-- ggplot(EXP1_l1_remove_bg@meta.data, aes(x = percent.plasmo)) +  -->
+<!--   geom_histogram(binwidth = 1) + -->
+<!--   scale_y_log10() + -->
+<!--   facet_wrap( ~ Group) -->
+
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- # EXP1_l2 remove bg genes -->
+<!-- EXP1_l2_remove_bg <- remove_plasmo_bg(lib_name = EXP1_l2) -->
+
+<!-- plasmo.genes.id <- grep(pattern = "gene-PF3D7", rownames(EXP1_l2_remove_bg)) -->
+
+<!-- EXP1_l2_remove_bg[["percent.plasmo"]] <- PercentageFeatureSet(EXP1_l2_remove_bg, pattern="^gene-PF3D7-") -->
+
+<!-- ggplot(EXP1_l2_remove_bg@meta.data, aes(x = percent.plasmo)) +  -->
+<!--   geom_histogram(binwidth = 1) + -->
+<!--   facet_wrap( ~ donor_id) -->
+
+<!-- range(EXP1_l2_remove_bg$percent.plasmo) -->
+
+<!-- ggplot(EXP1_l2_remove_bg@meta.data, aes(x = percent.plasmo)) +  -->
+<!--   geom_histogram(binwidth = 1) + -->
+<!--   scale_y_log10() + -->
+<!--   facet_wrap( ~ Group) -->
+
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- # EXP2_l1 remove bg genes -->
+<!-- EXP2_l1_remove_bg <- remove_plasmo_bg(lib_name = EXP2_l1) -->
+
+<!-- plasmo.genes.id <- grep(pattern = "gene-PF3D7", rownames(EXP2_l1_remove_bg)) -->
+
+<!-- EXP2_l1_remove_bg[["percent.plasmo"]] <- PercentageFeatureSet(EXP2_l1_remove_bg, pattern="^gene-PF3D7-") -->
+
+<!-- ggplot(EXP2_l1_remove_bg@meta.data, aes(x = percent.plasmo)) +  -->
+<!--   geom_histogram(binwidth = 1) + -->
+<!--   facet_wrap( ~ donor_id) -->
+
+<!-- range(EXP2_l1_remove_bg$percent.plasmo) -->
+
+<!-- ggplot(EXP2_l1_remove_bg@meta.data, aes(x = percent.plasmo)) +  -->
+<!--   geom_histogram(binwidth = 1) + -->
+<!--   scale_y_log10() + -->
+<!--   facet_wrap( ~ Group) -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- # EXP2_l2 remove bg genes -->
+<!-- EXP2_l2_remove_bg <- remove_plasmo_bg(lib_name = EXP2_l2) -->
+
+<!-- plasmo.genes.id <- grep(pattern = "gene-PF3D7", rownames(EXP2_l2_remove_bg)) -->
+
+<!-- EXP2_l2_remove_bg[["percent.plasmo"]] <- PercentageFeatureSet(EXP2_l2_remove_bg, pattern="^gene-PF3D7-") -->
+
+<!-- ggplot(EXP2_l2_remove_bg@meta.data, aes(x = percent.plasmo)) +  -->
+<!--   geom_histogram(binwidth = 1) + -->
+<!--   facet_wrap( ~ donor_id) -->
+
+<!-- range(EXP2_l2_remove_bg$percent.plasmo) -->
+
+<!-- ggplot(EXP2_l2_remove_bg@meta.data, aes(x = percent.plasmo)) +  -->
+<!--   geom_histogram(binwidth = 1) + -->
+<!--   scale_y_log10() + -->
+<!--   facet_wrap( ~ Group) -->
+
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- # EXP2_l3 remove bg genes -->
+<!-- EXP2_l3_remove_bg <- remove_plasmo_bg(lib_name = EXP2_l3) -->
+
+<!-- plasmo.genes.id <- grep(pattern = "gene-PF3D7", rownames(EXP2_l3_remove_bg)) -->
+
+<!-- EXP2_l3_remove_bg[["percent.plasmo"]] <- PercentageFeatureSet(EXP2_l3_remove_bg, pattern="^gene-PF3D7-") -->
+
+<!-- ggplot(EXP2_l3_remove_bg@meta.data, aes(x = percent.plasmo)) +  -->
+<!--   geom_histogram(binwidth = 1) + -->
+<!--   facet_wrap( ~ donor_id) -->
+
+<!-- range(EXP2_l3_remove_bg$percent.plasmo) -->
+
+<!-- ggplot(EXP2_l3_remove_bg@meta.data, aes(x = percent.plasmo)) +  -->
+<!--   geom_histogram(binwidth = 1) + -->
+<!--   scale_y_log10() + -->
+<!--   facet_wrap( ~ Group) -->
+
+<!-- ``` -->

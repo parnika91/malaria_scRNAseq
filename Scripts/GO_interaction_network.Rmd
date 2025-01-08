@@ -1,0 +1,270 @@
+---
+title: "Dual organism analysis - integrated libraries - malaria"
+output:
+  html_document:
+    keep_md: true
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+  pdf_document:
+    keep_md: true
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: kable
+always_allow_html: true
+---
+
+```{r setup, include=T} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(fig.width = 10, fig.height = 8) 
+```
+
+```{r}
+library(tidyverse)
+library(foreach)
+library(doParallel)
+```
+
+```{r}
+# Begin correlation method
+# 1. Count all interactions between every pair of pathways
+count_interactions <- function(host_genes, para_genes)
+{
+  # make pairs of genes
+  pairs <- expand.grid(host_genes, para_genes) %>% 
+    dplyr::rename(gene1 = Var1, gene2 = Var2) %>% 
+    mutate(melted_interaction = paste(gene1, gene2, sep ="|"))
+  
+  # check if correlation exists
+  # pick out all the interactions with the genes in the host GO. Then left_join (gene-PF3D7)
+  exists <- pairs %>% 
+    #filter(gene1 %in% host_genes) %>% 
+    inner_join(hp.cor.df.melted.interaction,.)
+    #filter(gene2 %in% para_genes)
+  
+  # hp.exists <- c()
+  # for(i in 1:nrow(pairs))
+  # {
+  #   host_index <- which(pairs$gene1[i] == hp.cor.df$gene1)
+  #   para_index <- which(pairs$gene2[i] == hp.cor.df$gene2)
+  #   
+  #   hp.exists[i] <- ifelse(test = any(host_index == para_index), yes = "yes", no = "no")
+  # }
+  # pairs$hp.exists <- hp.exists
+  
+  return(nrow(exists)) #what needs returning for randomised pathways? same thing I think
+}
+```
+
+```{r}
+# 2. Estimate background distribution
+randomise_host_pathway <- function(host_genes)
+{
+  # randomise a pathway
+  # # get genes in host term
+  # host_genes <- unlist(strsplit(hostGO[grep(pattern = host_term, hostGO$ID),"geneID"], split = "/"))
+  # 
+  # # get genes in parasite term
+  # para_genes <- unlist(strsplit(plasmoGO[grep(pattern = para_term, plasmoGO$GO.ID),"GeneIDs"], split = ","))
+  # para_genes <- paste("gene", para_genes, sep = "-")
+  # para_genes <- gsub("_", "-",para_genes)
+  
+  # 1. go thru all the genes in host pathway
+  # for(i in 1:length(host_genes))
+  # {
+    # count the number of genes it interacts with
+  host_gene_to_randomise <- sample(host_genes, 1)
+    if(host_gene_to_randomise %in% hp.cor.df$gene1)
+     {
+      number.of.interactors.for.host <- hp.cor.df %>% 
+          filter(gene1 == host_gene_to_randomise) %>% 
+          nrow()
+      
+      # randomly draw a gene from the database that has a similar number of interactors (+/-2)
+      hp.cor.df %>% 
+        group_by(gene1) %>% 
+        summarise(n = n()) -> host.similar
+      
+      # Here, a caveat is that I'm assuming that there will always be only one gene with the smallest diference
+      #replacing.gene <- host.similar$gene1[which.min(abs(host.similar$n - n_true))] # n_true is the value of the previous function
+      replacing.genes <- host.similar %>% 
+        filter(n <= number.of.interactors.for.host+10 & n >= number.of.interactors.for.host-10)
+      
+      pick.replacing.gene <- sample(replacing.genes$gene1, 1)
+      
+      # shuffled pathway
+      host_gene_index <- which(host_genes == host_gene_to_randomise)
+      
+      host_genes[host_gene_index] <- pick.replacing.gene
+      host_rand_genes <- host_genes
+    }
+  return(host_rand_genes) 
+}
+      
+      ## for para
+  # for(i in 1:length(para_genes))
+  # {
+    # count the number of genes it interacts with
+randomise_para_pathway <- function(para_genes)
+{
+  para_gene_to_randomise <- sample(para_genes, 1)  
+  if(para_gene_to_randomise %in% hp.cor.df$gene2)
+     {
+      number.of.interactors.for.para <- hp.cor.df %>% 
+          filter(gene2 == para_gene_to_randomise) %>% 
+          nrow()
+      
+      # randomly draw a gene from the database that has a similar number of interactors (+/-2)
+      hp.cor.df %>% 
+        group_by(gene2) %>% 
+        summarise(n = n()) -> para.similar
+      
+      # Here, a caveat is that I'm assuming that there will always be only one gene with the smallest diference
+      #replacing.gene <- host.similar$gene1[which.min(abs(host.similar$n - n_true))] # n_true is the value of the previous function
+      replacing.paragenes <- para.similar %>% 
+        filter(n <= number.of.interactors.for.para+10 & n >= number.of.interactors.for.para-10)
+      
+      pick.replacing.paragene <- sample(replacing.paragenes$gene2, 1)
+      
+      # shuffled pathway
+      para_gene_index <- which(para_genes == para_gene_to_randomise)
+      
+      para_genes[para_gene_index] <- pick.replacing.paragene
+      para_rand_genes <- para_genes
+    }
+  #}
+
+    return(para_rand_genes) 
+    
+  
+}
+```
+
+```{r}
+# 3. count the interactions in randomised pathways
+estimate_background <- function(inner_n, true_n)
+{
+  count_rand_interactions <- foreach(j=1:inner_n, .combine = "+") %do%
+  {
+    #count_rand_interactions[j] <- count_interactions(host_genes, para_genes)
+    host_rand_genes <- randomise_host_pathway(host_genes = host_genes)
+    para_rand_genes <- randomise_para_pathway(para_genes = para_genes)
+    ((count_interactions(host_genes = host_rand_genes, para_genes = para_rand_genes) >= true_n) +0)
+  #(abs(cor(study, study[sample(n, n),], use = 'pairwise.complete.obs') >= abs(ori_cor) +0))
+  }
+    
+  return(count_rand_interactions)
+}
+
+estimate_background_compiled <- compiler::cmpfun(estimate_background)
+```
+
+```{r}
+# script operations begin here
+
+# Get cor pairs
+cor.pairs <- readRDS("robjects/dual.TBplasmoremoved.reanalysed_SPZ_vs_iRBC_dual_nothr_corpairs.rds")
+
+cor.df <- data.frame(gene1 = cor.pairs$gene1,
+                        gene2 = cor.pairs$gene2,
+                        rho = cor.pairs$rho,
+                        p.value = cor.pairs$p.value,
+                        FDR = cor.pairs$FDR)
+
+type.cor.df <- cor.df %>% 
+  mutate(cor.type = case_when(
+    grepl(pattern = "PF3D7", gene1) & !grepl(pattern = "PF3D7", gene2) ~ "hp",
+    !grepl(pattern = "PF3D7", gene1) & grepl(pattern = "PF3D7", gene2) ~ "hp",
+    grepl(pattern = "PF3D7", gene1) & grepl(pattern = "PF3D7", gene2) ~ "pp",
+    !grepl(pattern = "PF3D7", gene1) & !grepl(pattern = "PF3D7", gene2) ~ "hh",
+    TRUE ~ "TRUE"
+  ))
+
+hp.cor.df <- type.cor.df %>% 
+  filter(cor.type == "hp") %>% 
+  filter(FDR <= 1e-10)
+
+for(k in 1:nrow(hp.cor.df))
+{
+  if(grepl(pattern = "PF3D7", hp.cor.df$gene1[k]))
+  {
+    plasmo_gene <- hp.cor.df$gene1[k]
+    hp.cor.df$gene1[k] <- hp.cor.df$gene2[k]
+    hp.cor.df$gene2[k] <- plasmo_gene
+  }
+}
+
+hp.cor.df.melted.interaction <- hp.cor.df %>% 
+    mutate(melted_interaction = paste(gene1, gene2, sep ="|"))
+
+# Make GO pairs
+
+# Get GO results
+hostGO <- read.csv2("tables/dual_SPZ_vs_RBC_hostGO.csv") %>% 
+  mutate(GO_desc = paste(ID, Description, sep = "_")) %>% 
+  filter(Count > 7 & Count < 90 &
+           p.adjust <= 0.001)
+plasmoGO <- read.csv("tables/dual_SPZ_vs_RBC_plasmoGO.csv", sep=";") %>% 
+  mutate(GO_desc = paste(GO.ID, Term, sep = "_")) %>% 
+  mutate(GeneID = strsplit(GenesForGOterm_neg, ",")) %>% 
+  filter(Significant > 3 &  Significant < 90 &
+           KS <= 0.15)
+
+for(i in 1:nrow(plasmoGO))
+{
+  starts_with_plasmo <- plasmoGO$GeneID[[i]][grep(pattern = "^PF3D7_", plasmoGO$GeneID[[i]])]
+  plasmoGO$GeneIDs[i] <- paste(unlist(sapply(starts_with_plasmo, function(x) str_sub(x, start = 1, end = 13))), collapse = ",")
+}
+
+GO.pairs <- expand.grid(hostGO$ID, plasmoGO$GO.ID) %>% 
+  dplyr::rename(host_GO = Var1, para_GO = Var2) %>% 
+  mutate(true_n = 0) %>% 
+  mutate(null.is.greater = 0) %>% 
+  mutate(emp.pvalue = 100000)
+```
+
+```{r}
+outer_n = 10
+inner_n = 100
+GO.pairs_start.index = 101
+GO.pairs_end.index = 250
+
+for(a in GO.pairs_start.index:GO.pairs_end.index)
+{
+  print(a)
+  # get genes in host term
+  host_genes <- unlist(strsplit(hostGO[grep(pattern = GO.pairs$host_GO[a], hostGO$ID),"geneID"], split = "/"))
+  
+  # get genes in parasite term
+  para_genes <- unlist(strsplit(plasmoGO[grep(pattern = GO.pairs$para_GO[a], plasmoGO$GO.ID),"GeneIDs"], split = ","))
+  para_genes <- paste("gene", para_genes, sep = "-")
+  para_genes <- gsub("_", "-",para_genes)
+  
+  # count true interactions
+  true_n <- count_interactions(host_genes = host_genes, para_genes = para_genes)
+  
+  # estimate background
+  registerDoParallel()
+  ptm <- proc.time()
+  total_null.is.greater <- foreach(b=1:outer_n, .combine = "+") %dopar%
+    estimate_background_compiled(inner_n = inner_n, true_n = true_n)
+  print(proc.time() - ptm)
+  
+  emp.pvalue <- total_null.is.greater/(inner_n*outer_n)
+  
+  GO.pairs$true_n[a] <- true_n
+  GO.pairs$null.is.greater[a] <- total_null.is.greater
+  GO.pairs$emp.pvalue[a] <- emp.pvalue
+  
+  
+}
+
+saveRDS(GO.pairs, paste0("GO.pairs.emp.pvalue", GO.pairs_start.index, "_until_", GO.pairs_end.index, ".rds"))
+write.csv2(GO.pairs, paste0("GO.pairs.emp.pvalue", GO.pairs_start.index, "_until_", GO.pairs_end.index, ".csv"), row.names = F, quote = F)
+
+#saveRDS(GO.pairs, "/fast/users/mukherjp_c/work/GO.pairs.emp.pvalue.rds")
+```
+

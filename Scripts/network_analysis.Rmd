@@ -1,0 +1,294 @@
+---
+title: "Dual organism analysis - pseudobulk RNA-seq - malaria"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+  toc: TRUE
+---
+
+
+```{r setup, include=T} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(fig.width = 10, fig.height = 8) 
+```
+
+```{r}
+library(Seurat)
+library(patchwork)
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+library(broom)
+library(stringr)
+library(ggplot2)
+library(SeuratData)
+#library(celldex)
+#install.packages("cowplot")
+library(cowplot)
+#devtools::install_github('cole-trapnell-lab/monocle3')
+#library(monocle3)
+#remotes::install_github('satijalab/seurat-wrappers')
+library(SeuratWrappers)
+#BiocManager::install('multtest', force = T)
+library(multtest)
+library(RColorBrewer)
+library(rtracklayer)
+library(DESeq2)
+library(data.table)
+library(MatrixModels)
+# library(SingleCellExperiment)
+# library(scran)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(topGO)
+library(ggrepel)
+library(igraph)
+#library(EnhanceVolcano)
+# install.packages('metap')
+#library(metap)
+#remotes::install_github("satijalab/seurat-data")
+
+```
+
+```{r}
+cor.pairs <- readRDS("robjects/dual.TBplasmoremoved.reanalysed_SPZ_vs_iRBC_dual_nothr_corpairs.rds")
+
+cor.df <- data.frame(gene1 = cor.pairs$gene1,
+                        gene2 = cor.pairs$gene2,
+                        rho = cor.pairs$rho,
+                        p.value = cor.pairs$p.value,
+                        FDR = cor.pairs$FDR)
+
+type.cor.df <- cor.df %>% 
+  mutate(cor.type = case_when(
+    grepl(pattern = "PF3D7", gene1) & !grepl(pattern = "PF3D7", gene2) ~ "hp",
+    !grepl(pattern = "PF3D7", gene1) & grepl(pattern = "PF3D7", gene2) ~ "hp",
+    grepl(pattern = "PF3D7", gene1) & grepl(pattern = "PF3D7", gene2) ~ "pp",
+    !grepl(pattern = "PF3D7", gene1) & !grepl(pattern = "PF3D7", gene2) ~ "hh",
+    TRUE ~ "TRUE"
+  ))
+
+hp.cor.df <- type.cor.df %>% 
+  filter(cor.type == "hp") %>% 
+  filter(FDR <= 1e-10) # 1e-07
+
+for(i in 1:nrow(hp.cor.df))
+{
+  if(grepl(pattern = "PF3D7", hp.cor.df$gene1[i]))
+  {
+    plasmo_gene <- hp.cor.df$gene1[i]
+    hp.cor.df$gene1[i] <- hp.cor.df$gene2[i]
+    hp.cor.df$gene2[i] <- plasmo_gene
+  }
+}
+```
+
+# construct igraph
+```{r}
+ig <- graph_from_data_frame(hp.cor.df, directed = F)
+vnames = c(unique(as.character(hp.cor.df$gene1)), unique(as.character(hp.cor.df$gene2)))
+hnum = length(unique(as.character(hp.cor.df$gene1)))
+pnum = length(unique(as.character(hp.cor.df$gene2)))
+#E(ig)$weight = hp.cor.df$rho
+V(ig)$color = c(rep("#FCA636FF", length(unique(hp.cor.df$gene1))), 
+                rep("#6A00A8FF", length(unique(hp.cor.df$gene2))))
+ig$layout <- layout_with_kk
+set.seed(567457)
+#pdf("GO_interaction_network_HPnodes.pdf", width = 20, height = 20)
+#svg("Host_para_gene_network.svg", width = 12, height = 12)
+plot(ig, 
+     vertex.color = V(ig)$color,
+     #edge.color = E(ig)$color,
+     vertex.size = 2, 
+     vertex.label=NA,
+     label.cex = 0.1,
+     edge.width = 0.1,
+     edge.colour = "gray"
+     #edge.curved=TRUE
+     )
+#dev.off()
+```
+
+# check edge betweenness algo for community detection
+```{r}
+# clustering using edge betweenness algorithm
+# Many networks consist of modules which are densely connected themselves but sparsely connected to other modules. 
+# Edge weights are used to calculate weighted edge betweenness. This means that edges are interpreted as distances, not as connection strengths.
+mst <- mst(ig, algorithm="prim")
+mst.communities <- edge.betweenness.community(mst, weights=NA, directed=FALSE)
+mst.clustering <- make_clusters(mst, membership=mst.communities$membership)
+
+commSummary <- data.frame(
+  mst.communities$names,
+  mst.communities$membership)
+colnames(commSummary) <- c("Gene", "Community")
+
+# check how the number of modules affect modularity of the network
+m <- vector()
+for (s in 0:200)
+{
+  memb <- cut_at(mst.communities, no=s)
+  m <- c(m, modularity (ig, memb, weights=NULL))
+} 
+
+png("modularity_betwenness.png", width = 30, height = 10, unit = "cm", res = 300)
+plot(0:200, m, col="blue",xlab="Modules",ylab="Modularity")
+dev.off()
+```
+
+# Community detection based on leading eigenvector 
+```{r}
+###### communities with leading eigenvector ############
+# This function tries to find densely connected subgraphs in a graph by calculating the leading non-negative eigenvector of the modularity matrix of the graph. 
+comm.eig <- cluster_leading_eigen(ig, steps = -1, weights = NA,
+  start = NULL, options = arpack_defaults, callback = NULL,
+  extra = NULL, env = parent.frame())
+
+commSummary <- data.frame(
+  comm.eig$names,
+  comm.eig$membership)
+colnames(commSummary) <- c("Gene", "Community")
+
+m <- vector()
+for (s in 0:200)
+{
+  memb <- cut_at(comm.eig, no=s)
+  m <- c(m, modularity (ig, memb, weights=NULL))
+} 
+png("modularity_leading_eigen.png", width = 30, height = 10, unit = "cm", res = 300)
+plot(0:200, m, col="blue",xlab="Modules",ylab="Modularity")
+dev.off()
+```
+
+# Community detection with fast greedy algorithm
+```{r}
+#### communities with fast greedy algorithm
+comm.fg <- cluster_fast_greedy(ig, merges = TRUE, modularity = TRUE,
+  membership = TRUE, weights = abs(E(ig)$weight))
+
+m <- vector()
+
+for (s in 0:200)
+{
+  memb <- cut_at(comm.fg, no=s)
+  m <- c(m, modularity(ig, memb, weights=NULL))
+} 
+
+png("modularity_fast_greedy.png", width = 30, height = 10, unit = "cm", res = 300)
+plot(0:200, m, col="blue",xlab="Modules",ylab="Modularity")
+dev.off()
+```
+
+# Choosing edge betweenness
+```{r}
+commSummary_annot <- commSummary %>% 
+  mutate(Gene = gsub("gene-PF3D7-", "PF3D7_", Gene)) %>% 
+  mutate(cor.type = case_when(
+    grepl(pattern = "PF3D7", Gene) ~ "para",
+    TRUE ~ "host"))
+
+saveRDS(commSummary_annot, "SPZ_vs_iRBC_cor_communities_edgebetweenness_detection.rds")
+write.csv2(commSummary_annot, "SPZ_vs_iRBC_cor_communities_edgebetweenness_detection.csv", row.names = F, quote = F)
+```
+
+```{r}
+cl <- cluster_louvain(ig, weights = NA, resolution = 2)
+pdf("SPZ_vs_iRBC_communities.pdf")
+#layout <-layout.fruchterman.reingold(ig)
+plot(mst.communities, ig,  vertex.label=NA, vertex.size=2)
+dev.off()
+```
+
+# Network properties
+```{r}
+degree <- data.frame(degree = igraph::degree(ig, v = V(ig), normalized = F, loops = F, mode = "all"))
+eigen <- data.frame(EC = eigen_centrality(ig, weights = NA)[["vector"]])
+bw <- data.frame(BW = betweenness(ig, directed = F, normalized = T, weights = NA))
+
+write.csv2(degree, "SPZ_vs_RBC_degree.csv", row.names = T, quote = F)
+write.csv2(eigen, "SPZ_vs_RBC_ec.csv", row.names = T, quote = F)
+write.csv2(bw, "SPZ_vs_RBC_betweenness.csv", row.names = T, quote = F)
+
+plasmo_degree <- degree %>% 
+ filter(grepl("PF3D7", rownames(.)))
+host_degree <- degree %>% 
+ filter(!grepl("PF3D7", rownames(.)))
+
+plasmo_ec <- eigen %>% 
+ filter(grepl("PF3D7", rownames(.)))
+host_ec <- eigen %>% 
+ filter(!grepl("PF3D7", rownames(.)))
+
+plasmo_bw <- bw %>% 
+ filter(grepl("PF3D7", rownames(.)))
+host_bw <- bw %>% 
+ filter(!grepl("PF3D7", rownames(.)))
+
+write.csv2(plasmo_degree, "SPZ_vs_RBC_pl_degree.csv", row.names = T, quote = F)
+write.csv2(plasmo_ec, "SPZ_vs_RBC_pl_ec.csv", row.names = T, quote = F)
+write.csv2(plasmo_bw, "SPZ_vs_RBC_pl_betweenness.csv", row.names = T, quote = F)
+```
+
+
+```{r}
+ggplot(degree, aes(x = degree)) +
+  geom_histogram(fill = "lemonchiffon3", colour = "lemonchiffon4") +
+  theme_bw() +
+  theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size = 16))
+ggsave("SPZ_vs_iRBC_degree_notnormlised_plot.png")
+
+eigen_ <- data.frame(EC = eigen[eigen$EC >= 0,])
+ggplot(eigen, aes(x = EC)) +
+  geom_histogram(fill = "lightblue3", colour = "lightblue4") +
+  theme_bw() +
+  theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size = 16)) +
+  xlab("Eigenvector centrality")
+ggsave("SPZ_vs_iRBC_EC_plot.png")
+
+ggplot(bw, aes(x = BW)) +
+  geom_histogram(fill = "lightpink3", colour = "lightpink4") +
+  theme_bw() +
+  theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size = 16)) +
+  xlab("Betweenness")
+ggsave("SPZ_vs_iRBC_BW_plot.png")
+```
+
+
+```{r}
+ig <- graph_from_data_frame(GO.pairs.emp.select.GOterm[,c("h_host_GO_term",
+                                                          "p_para_GO_term",
+                                                          "scaled_true_n")], directed = F)
+E(ig)$weight = GO.pairs.emp.select.GOterm$scaled_true_n 
+V(ig)$color = c(rep("#FCA636FF", length(unique(GO.pairs.emp.select.GOterm$host_GO))), 
+                rep("#6A00A8FF", length(unique(GO.pairs.emp.select.GOterm$para_GO))))
+V(ig)$type = c(rep("host", length(unique(GO.pairs.emp.select.GOterm$host_GO))), 
+                rep("parasite", length(unique(GO.pairs.emp.select.GOterm$para_GO))))
+ig$layout <- layout_with_fr
+# layout_with_fr
+#com <- cluster_spinglass(ig, spins=5)
+# mst <- mst(ig, algorithm="prim")
+# com <- edge.betweenness.community(mst, weights=NA, directed=FALSE)
+com <- cluster_leading_eigen(ig)
+V(ig)$color <- com$membership+1
+set.seed(567457)
+#pdf("GO_interaction_network_HPnodes.pdf", width = 20, height = 20)
+svg("GO_interaction_network.svg", width = 12, height = 12)
+plot(ig, 
+     vertex.color = V(ig)$color,
+     #edge.color = E(ig)$color,
+     vertex.size = 4, 
+     vertex.label=NA,
+     label.cex = 0.1,
+     edge.width = E(ig)$weight
+     #edge.curved=TRUE
+     )
+dev.off()
+```
+

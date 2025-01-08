@@ -1,0 +1,60 @@
+---
+title: "Single cell RNA-seq of Plasmodium sporozoite-infected monocytes"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+  toc: TRUE
+---
+
+```{r opts, echo = F}
+knitr::opts_chunk$set(warning = F, message = F)
+# knitr::opts_chunk$set(fig.pos = "!H", out.extra = "")
+#knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80),tidy=TRUE)
+
+```
+
+```{r load_libraries, echo = F, message = F, warning = F}
+library(Seurat)
+library(patchwork)
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+library(broom)
+library(stringr)
+library(ggplot2)
+library(cowplot)
+library(RColorBrewer)
+library(presto)
+#install.packages('devtools')
+#devtools::install_github('immunogenomics/presto')
+#remotes::install_github('chris-mcginnis-ucsf/DoubletFinder')
+#library(DoubletFinder)
+# devtools::install_github("satijalab/seurat-data")
+# devtools::install_github("satijalab/azimuth")
+# library(Azimuth)
+# library(SeuratData)
+```
+
+```{r QC, child = 'QC.Rmd', echo = T, result = 'asis'}
+
+```
+
+```{r demultiplex, child = 'demultiplex.Rmd', echo = T, result = 'asis'}
+
+```
+
+<!-- ```{r normalisation_lognormal, child = 'normalisation_lognormal.Rmd', echo = T, result = 'asis'} -->
+
+<!-- ``` -->
+
+```{r dim_red, child = 'dim_red.Rmd', echo = T, result = 'asis'}
+
+```
+
+```{r diff_exp, child = 'diff_exp_features.Rmd', echo = T, result = 'asis'}
+
+```

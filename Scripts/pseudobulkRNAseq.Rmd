@@ -1,0 +1,845 @@
+---
+title: "Single cell RNA-seq of Plasmodium sporozoite-infected monocytes - pseudo bulk RNA-seq analysis"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+  toc: TRUE
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r}
+library(Seurat)
+library(patchwork)
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+library(broom)
+library(stringr)
+library(ggplot2)
+library(SeuratData)
+#library(celldex)
+#install.packages("cowplot")
+library(cowplot)
+#devtools::install_github('cole-trapnell-lab/monocle3')
+library(monocle3)
+#remotes::install_github('satijalab/seurat-wrappers')
+library(SeuratWrappers)
+library(DESeq2)
+library(pheatmap)
+library(RColorBrewer)
+library(ggrepel)
+library(data.table)
+# mulattoes::install('multtest')
+# install.packages('metap')
+#library(metap)
+#remotes::install_github("satijalab/seurat-data")
+```
+
+```{r}
+immune.combined <- readRDS("immune.combined.TBremoved.rds")
+
+DefaultAssay(immune.combined) <- "RNA"
+
+immune.combined@meta.data <- immune.combined@meta.data %>% 
+  mutate(condition_collapse = case_when(
+    (Group == "sporozoite_infected"  | Group == "sporozoite_bystander") ~ "sporozoite_bys_inf",
+    (Group == "RBC_infected" | Group == "RBC_bystander") ~ "RBC_bys_inf",
+    .default = Group
+  ))
+
+table(immune.combined$Donorid, immune.combined$orig.ident)
+
+immune.combined@meta.data$cond_collapse_donor <- paste(immune.combined@meta.data$condition_collapse,
+                                               immune.combined@meta.data$Donorid,
+                                               sep = "")
+
+cts <- AggregateExpression(immune.combined,
+              group.by = c("cellID", "cond_collapse_donor"),
+              assays = "RNA",
+              slot = "counts",
+              return.seurat = F)
+cts <- cts$RNA
+
+# transpose
+# cts.t <- as.data.frame(t(cts))
+#
+# # split.data.frame
+# splitRows <- gsub('_.*', '', rownames(cts.t))
+# #splitRows <- sapply(strsplit(rownames(cts.t), split = "D"), function(x) x[1])
+# cts.split <- split.data.frame(cts.t,
+#                  f = factor(splitRows))
+# 
+# # fix colnames and transpose
+# cts.modified <- lapply(cts.split, function(x){
+#   rownames(x) <- gsub("(.+?)(\\_.*)", "\\2", rownames(x))
+#   rownames(x) <- gsub("^_", "\\1", rownames(x))
+#   t(x)
+# })
+```
+
+1. SPZ_bys_inf vs RBC_bys_inf
+```{r}
+# Monocytes activated (type I IFN signature)
+# Run DE analysis
+# 1. Get counts matrix
+
+condition1 <- "sporozoite_bys_inf"
+condition2 <- "RBC_bys_inf"
+#celltype <- "Monocytes activated (Nfkb)"
+
+counts <- cts %>% 
+  as.data.frame() %>% 
+  dplyr::select(c(starts_with(condition1), starts_with(condition2)))
+
+# 2 Generate metadata
+colData <- data.frame(sample = colnames(counts))
+colData$condition = sapply(str_split(colData$sample, "D"), function(x) x[1])
+colData <- colData %>% 
+  column_to_rownames("sample")
+
+# more info for metadata
+
+# DEseq2 object
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                             colData = colData,
+                             design = ~condition)
+
+# filter dds
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+
+```
+
+```{r}
+# Transform counts for data visualization
+rld <- rlog(dds, blind=F)
+
+# Plot PCA
+png(paste0("PCA_", condition1, "_vs_", condition2, "_", celltype, ".png"))
+DESeq2::plotPCA(rld, ntop = 500, intgroup = "condition")
+dev.off()
+
+# Extract the rlog matrix from the object and compute pairwise correlation values
+rld_mat <- assay(rld)
+rld_cor <- cor(rld_mat)
+
+# Plot heatmap
+pdf(paste0("Corr_heatmap_", condition1, "_vs_", condition2, "_", celltype, ".pdf"), width = 8, height = 6)
+pheatmap(rld_cor, annotation = colData[, c("condition"), drop=F])
+dev.off()
+
+#Similar to PCA, hierarchical clustering is another, complementary method for identifying strong patterns in a dataset and potential outliers. The heatmap displays the correlation of gene expression for all pairwise combinations of samples in the dataset. Since the majority of genes are not differentially expressed, samples generally have high correlations with each other (values higher than 0.80). Samples below 0.80 may indicate an outlier in your data and/or sample contamination.
+
+#The hierarchical tree can indicate which samples are more similar to each other based on the normalized gene expression values. The color blocks indicate substructure in the data, and you would expect to see your replicates cluster together as a block for each sample group. Additionally, we expect to see samples clustered similar to the groupings observed in a PCA plot.
+
+```
+
+<!-- ```{r} -->
+<!-- # Plot dispersion estimates -->
+<!-- plotDispEsts(dds) -->
+<!-- ``` -->
+
+```{r}
+
+# check the coefficients
+resultsNames(dds)
+comparison <- resultsNames(dds)[2]
+
+res <- results(dds, name = comparison, alpha = 0.05)
+res <- res <- lfcShrink(dds, 
+                 coef =  comparison,
+                 res=res)
+res
+
+
+# Turn the DESeq2 results object into a tibble for use with tidyverse functions
+res_tbl <- res %>%
+  data.frame() %>%
+  rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  arrange(pvalue)
+
+# Check results output
+res_tbl
+
+# Write all results to file
+# write.csv(res_tbl,
+#           paste0(comparison,".csv"),
+#           quote = FALSE, 
+#           row.names = FALSE)
+
+####
+padj_cutoff <- 0.05
+
+# Subset the significant results
+sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff) %>%
+  filter(abs(log2FoldChange) > 1.5) %>% 
+  dplyr::arrange(padj)
+
+# Check significant genes output
+DT::datatable(sig_res)
+
+# Write all results to file
+# write.csv(sig_res,
+#           paste0(comparison,".csv"),
+#           quote = FALSE, 
+#           row.names = FALSE)
+```
+
+<!-- ```{r} -->
+<!-- # Scatterplot -->
+
+<!-- ## Extract normalized counts from dds object -->
+<!-- normalized_counts <- counts(dds, normalized = TRUE) -->
+
+<!-- ## Extract top 20 DEG from resLFC (make sure to order by padj) -->
+<!-- top20_sig_genes <- sig_res %>% -->
+<!--   dplyr::arrange(padj) %>% -->
+<!--   dplyr::pull(gene) %>% -->
+<!--   head(n = 20) -->
+
+<!-- ## Extract matching normalized count values from matrix -->
+<!-- top20_sig_counts <- normalized_counts[rownames(normalized_counts) %in% top20_sig_genes, ] -->
+<!-- top20_sig_counts -->
+
+<!-- ## Convert wide matrix to long data frame for ggplot2 -->
+<!-- top20_sig_df <- data.frame(top20_sig_counts) -->
+<!-- top20_sig_df$gene <- rownames(top20_sig_counts) -->
+
+<!-- top20_sig_df <- melt(setDT(top20_sig_df),  -->
+<!--                      id.vars = c("gene"), -->
+<!--                      variable.name = "condition") %>%  -->
+<!--   data.frame() -->
+
+<!-- ## Replace "." by " " in cluster_sample_id variable (melt() introduced the ".") -->
+<!-- top20_sig_df$condition <- gsub("\\.", " ", top20_sig_df$condition) -->
+<!-- top20_sig_df -->
+
+<!-- ## Join counts data frame with metadata -->
+<!-- top20_sig_df <- plyr::join(top20_sig_df, as.data.frame(colData(dds)), -->
+<!--                            by = "condition") -->
+<!-- top20_sig_df -->
+
+<!-- ## Generate plot -->
+<!-- png("pseudobulk_pergene1.png", res = 300, width = 40, height = 40, units = "cm") -->
+<!-- ggplot(top20_sig_df, aes(y = value, x = condition, col = condition)) + -->
+<!--   geom_jitter(height = 0, width = 0.15) + -->
+<!--   scale_y_continuous(trans = 'log10') + -->
+<!--   ylab("log10 of normalized expression level") + -->
+<!--   xlab("condition") + -->
+<!--   ggtitle("Top 20 Significant DE Genes") + -->
+<!--   theme(plot.title = element_text(hjust = 0.5)) + -->
+<!--   facet_wrap(~ gene) -->
+<!-- dev.off() -->
+
+<!-- ``` -->
+
+```{r}
+# Heatmap
+
+## Extract normalized counts from dds object
+normalized_counts <- counts(dds, normalized = TRUE)
+
+## Extract normalized counts for significant genes only
+sig_counts <- normalized_counts[rownames(normalized_counts) %in% sig_res$gene, ]
+
+## Set a color-blind friendly palette
+heat_colors <- rev(brewer.pal(11, "PuOr"))
+
+vsd <- assay(vst(dds, 
+           nsub = sum( rowMeans( counts(dds, normalized=TRUE)) > 5 )))
+  z <- t(scale(t(vsd))) %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column("gene")
+  
+  sig_genes <- sig_res %>% 
+    arrange(padj)
+  z <- z %>% 
+    left_join(sig_genes, .) %>% 
+    dplyr::select(-c(baseMean, log2FoldChange, lfcSE, pvalue, padj)) %>% 
+    column_to_rownames("gene")
+  # z_pos <- z[rownames(z) %in% rownames(sig.genes_table_pos),]
+  # z_neg <- z[rownames(z) %in% rownames(sig.genes_table_neg),]
+
+Heatmap(z[1:50,], name = "z-score", 
+        width = ncol(sig_counts)*unit(5, "mm"), 
+        height = 50*unit(2.5, "mm"),
+        col = heat_colors, 
+        cluster_rows= T, cluster_columns = T, 
+        show_column_dend = T, show_row_dend = F, 
+        show_row_names = T, 
+        row_names_gp = gpar(fontsize = 5),
+        column_names_side = "top", column_names_rot = 45, 
+        column_names_gp = gpar(fontsize = 6),
+        #row_km = 2, 
+        column_km = 2, border = TRUE, 
+        column_title = NULL, row_title = NULL, 
+        border_gp = gpar(col = "darkgrey"))
+
+
+```
+
+2. SPZ_bys_inf vs SPZ_control
+```{r}
+# Monocytes activated (type I IFN signature)
+# Run DE analysis
+# 1. Get counts matrix
+
+condition1 <- "sporozoite_bys_inf"
+condition2 <- "control"
+#celltype <- "Monocytes activated (Nfkb)"
+
+counts <- cts %>% 
+  as.data.frame() %>% 
+  dplyr::select(c(starts_with(condition1), starts_with(condition2)))
+
+# 2 Generate metadata
+colData <- data.frame(sample = colnames(counts))
+colData$condition = sapply(str_split(colData$sample, "D"), function(x) x[1])
+colData <- colData %>% 
+  column_to_rownames("sample")
+
+# more info for metadata
+
+# DEseq2 object
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                             colData = colData,
+                             design = ~condition)
+
+# filter dds
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+
+```
+
+```{r}
+# Transform counts for data visualization
+rld <- rlog(dds, blind=F)
+
+# Plot PCA
+png(paste0("PCA_", condition1, "_vs_", condition2, "_", celltype, ".png"))
+DESeq2::plotPCA(rld, ntop = 500, intgroup = "condition")
+dev.off()
+
+# Extract the rlog matrix from the object and compute pairwise correlation values
+rld_mat <- assay(rld)
+rld_cor <- cor(rld_mat)
+
+# Plot heatmap
+pdf(paste0("Corr_heatmap_", condition1, "_vs_", condition2, "_", celltype, ".pdf"), width = 8, height = 6)
+pheatmap(rld_cor, annotation = colData[, c("condition"), drop=F])
+dev.off()
+
+#Similar to PCA, hierarchical clustering is another, complementary method for identifying strong patterns in a dataset and potential outliers. The heatmap displays the correlation of gene expression for all pairwise combinations of samples in the dataset. Since the majority of genes are not differentially expressed, samples generally have high correlations with each other (values higher than 0.80). Samples below 0.80 may indicate an outlier in your data and/or sample contamination.
+
+#The hierarchical tree can indicate which samples are more similar to each other based on the normalized gene expression values. The color blocks indicate substructure in the data, and you would expect to see your replicates cluster together as a block for each sample group. Additionally, we expect to see samples clustered similar to the groupings observed in a PCA plot.
+
+```
+
+<!-- ```{r} -->
+<!-- # Plot dispersion estimates -->
+<!-- plotDispEsts(dds) -->
+<!-- ``` -->
+
+```{r}
+
+# check the coefficients
+resultsNames(dds)
+comparison <- resultsNames(dds)[2]
+
+res <- results(dds, name = comparison, alpha = 0.05)
+res <- res <- lfcShrink(dds, 
+                 coef =  comparison,
+                 res=res)
+res
+
+
+# Turn the DESeq2 results object into a tibble for use with tidyverse functions
+res_tbl <- res %>%
+  data.frame() %>%
+  rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  arrange(pvalue)
+
+# Check results output
+res_tbl
+
+# Write all results to file
+# write.csv(res_tbl,
+#           paste0(comparison,".csv"),
+#           quote = FALSE, 
+#           row.names = FALSE)
+
+####
+padj_cutoff <- 0.05
+
+# Subset the significant results
+sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff) %>%
+  filter(abs(log2FoldChange) > 1.5) %>% 
+  dplyr::arrange(padj)
+
+# Check significant genes output
+DT::datatable(sig_res)
+
+# Write all results to file
+# write.csv(sig_res,
+#           paste0(comparison,".csv"),
+#           quote = FALSE, 
+#           row.names = FALSE)
+```
+
+<!-- ```{r} -->
+<!-- # Scatterplot -->
+
+<!-- ## Extract normalized counts from dds object -->
+<!-- normalized_counts <- counts(dds, normalized = TRUE) -->
+
+<!-- ## Extract top 20 DEG from resLFC (make sure to order by padj) -->
+<!-- top20_sig_genes <- sig_res %>% -->
+<!--   dplyr::arrange(padj) %>% -->
+<!--   dplyr::pull(gene) %>% -->
+<!--   head(n = 20) -->
+
+<!-- ## Extract matching normalized count values from matrix -->
+<!-- top20_sig_counts <- normalized_counts[rownames(normalized_counts) %in% top20_sig_genes, ] -->
+<!-- top20_sig_counts -->
+
+<!-- ## Convert wide matrix to long data frame for ggplot2 -->
+<!-- top20_sig_df <- data.frame(top20_sig_counts) -->
+<!-- top20_sig_df$gene <- rownames(top20_sig_counts) -->
+
+<!-- top20_sig_df <- melt(setDT(top20_sig_df),  -->
+<!--                      id.vars = c("gene"), -->
+<!--                      variable.name = "condition") %>%  -->
+<!--   data.frame() -->
+
+<!-- ## Replace "." by " " in cluster_sample_id variable (melt() introduced the ".") -->
+<!-- top20_sig_df$condition <- gsub("\\.", " ", top20_sig_df$condition) -->
+<!-- top20_sig_df -->
+
+<!-- ## Join counts data frame with metadata -->
+<!-- top20_sig_df <- plyr::join(top20_sig_df, as.data.frame(colData(dds)), -->
+<!--                            by = "condition") -->
+<!-- top20_sig_df -->
+
+<!-- ## Generate plot -->
+<!-- png("pseudobulk_pergene1.png", res = 300, width = 40, height = 40, units = "cm") -->
+<!-- ggplot(top20_sig_df, aes(y = value, x = condition, col = condition)) + -->
+<!--   geom_jitter(height = 0, width = 0.15) + -->
+<!--   scale_y_continuous(trans = 'log10') + -->
+<!--   ylab("log10 of normalized expression level") + -->
+<!--   xlab("condition") + -->
+<!--   ggtitle("Top 20 Significant DE Genes") + -->
+<!--   theme(plot.title = element_text(hjust = 0.5)) + -->
+<!--   facet_wrap(~ gene) -->
+<!-- dev.off() -->
+
+<!-- ``` -->
+
+```{r}
+# Heatmap
+
+## Extract normalized counts from dds object
+normalized_counts <- counts(dds, normalized = TRUE)
+
+## Extract normalized counts for significant genes only
+sig_counts <- normalized_counts[rownames(normalized_counts) %in% sig_res$gene, ]
+
+## Set a color-blind friendly palette
+heat_colors <- rev(brewer.pal(11, "PuOr"))
+
+vsd <- assay(vst(dds, 
+           nsub = sum( rowMeans( counts(dds, normalized=TRUE)) > 5 )))
+  z <- t(scale(t(vsd))) %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column("gene")
+  
+  sig_genes <- sig_res %>% 
+    arrange(padj)
+  z <- z %>% 
+    left_join(sig_genes, .) %>% 
+    dplyr::select(-c(baseMean, log2FoldChange, lfcSE, pvalue, padj)) %>% 
+    column_to_rownames("gene")
+  # z_pos <- z[rownames(z) %in% rownames(sig.genes_table_pos),]
+  # z_neg <- z[rownames(z) %in% rownames(sig.genes_table_neg),]
+
+Heatmap(z[1:50,], name = "z-score", 
+        width = ncol(sig_counts)*unit(5, "mm"), 
+        height = 50*unit(2.5, "mm"),
+        col = heat_colors, 
+        cluster_rows= T, cluster_columns = T, 
+        show_column_dend = T, show_row_dend = F, 
+        show_row_names = T, 
+        row_names_gp = gpar(fontsize = 5),
+        column_names_side = "top", column_names_rot = 45, 
+        column_names_gp = gpar(fontsize = 6),
+        #row_km = 2, 
+        column_km = 2, border = TRUE, 
+        column_title = NULL, row_title = NULL, 
+        border_gp = gpar(col = "darkgrey"))
+
+
+```
+
+3. RBC_bys_inf vs RBC_control
+```{r}
+# Monocytes activated (type I IFN signature)
+# Run DE analysis
+# 1. Get counts matrix
+
+condition1 <- "RBC_bys_inf"
+condition2 <- "RBC_control"
+#celltype <- "Monocytes activated (Nfkb)"
+
+counts <- cts %>% 
+  as.data.frame() %>% 
+  dplyr::select(c(starts_with(condition1), starts_with(condition2)))
+
+# 2 Generate metadata
+colData <- data.frame(sample = colnames(counts))
+colData$condition = sapply(str_split(colData$sample, "D"), function(x) x[1])
+colData <- colData %>% 
+  column_to_rownames("sample")
+
+# more info for metadata
+
+# DEseq2 object
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                             colData = colData,
+                             design = ~condition)
+
+# filter dds
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+
+```
+
+```{r}
+# Transform counts for data visualization
+rld <- rlog(dds, blind=F)
+
+# Plot PCA
+png(paste0("PCA_", condition1, "_vs_", condition2, "_", celltype, ".png"))
+DESeq2::plotPCA(rld, ntop = 500, intgroup = "condition")
+dev.off()
+
+# Extract the rlog matrix from the object and compute pairwise correlation values
+rld_mat <- assay(rld)
+rld_cor <- cor(rld_mat)
+
+# Plot heatmap
+pdf(paste0("Corr_heatmap_", condition1, "_vs_", condition2, "_", celltype, ".pdf"), width = 8, height = 6)
+pheatmap(rld_cor, annotation = colData[, c("condition"), drop=F])
+dev.off()
+
+#Similar to PCA, hierarchical clustering is another, complementary method for identifying strong patterns in a dataset and potential outliers. The heatmap displays the correlation of gene expression for all pairwise combinations of samples in the dataset. Since the majority of genes are not differentially expressed, samples generally have high correlations with each other (values higher than 0.80). Samples below 0.80 may indicate an outlier in your data and/or sample contamination.
+
+#The hierarchical tree can indicate which samples are more similar to each other based on the normalized gene expression values. The color blocks indicate substructure in the data, and you would expect to see your replicates cluster together as a block for each sample group. Additionally, we expect to see samples clustered similar to the groupings observed in a PCA plot.
+
+```
+
+<!-- ```{r} -->
+<!-- # Plot dispersion estimates -->
+<!-- plotDispEsts(dds) -->
+<!-- ``` -->
+
+```{r}
+
+# check the coefficients
+resultsNames(dds)
+comparison <- resultsNames(dds)[2]
+
+res <- results(dds, name = comparison, alpha = 0.05)
+res <- res <- lfcShrink(dds, 
+                 coef =  comparison,
+                 res=res)
+res
+
+
+# Turn the DESeq2 results object into a tibble for use with tidyverse functions
+res_tbl <- res %>%
+  data.frame() %>%
+  rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  arrange(pvalue)
+
+# Check results output
+res_tbl
+
+# Write all results to file
+# write.csv(res_tbl,
+#           paste0(comparison,".csv"),
+#           quote = FALSE, 
+#           row.names = FALSE)
+
+####
+padj_cutoff <- 0.05
+
+# Subset the significant results
+sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff) %>%
+  filter(abs(log2FoldChange) > 1.5) %>% 
+  dplyr::arrange(padj)
+
+# Check significant genes output
+DT::datatable(sig_res)
+
+# Write all results to file
+# write.csv(sig_res,
+#           paste0(comparison,".csv"),
+#           quote = FALSE, 
+#           row.names = FALSE)
+```
+
+<!-- ```{r} -->
+<!-- # Scatterplot -->
+
+<!-- ## Extract normalized counts from dds object -->
+<!-- normalized_counts <- counts(dds, normalized = TRUE) -->
+
+<!-- ## Extract top 20 DEG from resLFC (make sure to order by padj) -->
+<!-- top20_sig_genes <- sig_res %>% -->
+<!--   dplyr::arrange(padj) %>% -->
+<!--   dplyr::pull(gene) %>% -->
+<!--   head(n = 20) -->
+
+<!-- ## Extract matching normalized count values from matrix -->
+<!-- top20_sig_counts <- normalized_counts[rownames(normalized_counts) %in% top20_sig_genes, ] -->
+<!-- top20_sig_counts -->
+
+<!-- ## Convert wide matrix to long data frame for ggplot2 -->
+<!-- top20_sig_df <- data.frame(top20_sig_counts) -->
+<!-- top20_sig_df$gene <- rownames(top20_sig_counts) -->
+
+<!-- top20_sig_df <- melt(setDT(top20_sig_df),  -->
+<!--                      id.vars = c("gene"), -->
+<!--                      variable.name = "condition") %>%  -->
+<!--   data.frame() -->
+
+<!-- ## Replace "." by " " in cluster_sample_id variable (melt() introduced the ".") -->
+<!-- top20_sig_df$condition <- gsub("\\.", " ", top20_sig_df$condition) -->
+<!-- top20_sig_df -->
+
+<!-- ## Join counts data frame with metadata -->
+<!-- top20_sig_df <- plyr::join(top20_sig_df, as.data.frame(colData(dds)), -->
+<!--                            by = "condition") -->
+<!-- top20_sig_df -->
+
+<!-- ## Generate plot -->
+<!-- png("pseudobulk_pergene1.png", res = 300, width = 40, height = 40, units = "cm") -->
+<!-- ggplot(top20_sig_df, aes(y = value, x = condition, col = condition)) + -->
+<!--   geom_jitter(height = 0, width = 0.15) + -->
+<!--   scale_y_continuous(trans = 'log10') + -->
+<!--   ylab("log10 of normalized expression level") + -->
+<!--   xlab("condition") + -->
+<!--   ggtitle("Top 20 Significant DE Genes") + -->
+<!--   theme(plot.title = element_text(hjust = 0.5)) + -->
+<!--   facet_wrap(~ gene) -->
+<!-- dev.off() -->
+
+<!-- ``` -->
+
+```{r}
+# Heatmap
+
+## Extract normalized counts from dds object
+normalized_counts <- counts(dds, normalized = TRUE)
+
+## Extract normalized counts for significant genes only
+sig_counts <- normalized_counts[rownames(normalized_counts) %in% sig_res$gene, ]
+
+## Set a color-blind friendly palette
+heat_colors <- rev(brewer.pal(11, "PuOr"))
+
+vsd <- assay(vst(dds, 
+           nsub = sum( rowMeans( counts(dds, normalized=TRUE)) > 5 )))
+  z <- t(scale(t(vsd))) %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column("gene")
+  
+  sig_genes <- sig_res %>% 
+    arrange(padj)
+  z <- z %>% 
+    left_join(sig_genes, .) %>% 
+    dplyr::select(-c(baseMean, log2FoldChange, lfcSE, pvalue, padj)) %>% 
+    column_to_rownames("gene")
+  # z_pos <- z[rownames(z) %in% rownames(sig.genes_table_pos),]
+  # z_neg <- z[rownames(z) %in% rownames(sig.genes_table_neg),]
+
+Heatmap(z[1:50,], name = "z-score", 
+        width = ncol(sig_counts)*unit(5, "mm"), 
+        height = 50*unit(2.5, "mm"),
+        col = heat_colors, 
+        cluster_rows= T, cluster_columns = T, 
+        show_column_dend = T, show_row_dend = F, 
+        show_row_names = T, 
+        row_names_gp = gpar(fontsize = 5),
+        column_names_side = "top", column_names_rot = 45, 
+        column_names_gp = gpar(fontsize = 6),
+        #row_km = 2, 
+        column_km = 2, border = TRUE, 
+        column_title = NULL, row_title = NULL, 
+        border_gp = gpar(col = "darkgrey"))
+
+
+```
+
+
+
+
+
+
+
+
+```{r}
+# add all activated celltypes
+
+act.mono.nfkb <- cts.modified$`Monocytes activated (Nfkb)`
+act.mono.nfkb.ifn <- cts.modified$`Monocytes activated (Nfkb + type I IFN)`
+act.mono.ifn <- cts.modified$`Monocytes activated (type I IFN signature)`
+
+common_conditions <- intersect(intersect(colnames(act.mono.nfkb), colnames(act.mono.nfkb.ifn)), colnames(act.mono.ifn))
+
+act.mono <- data.frame()
+
+for(i in 1:length(common_conditions))
+{
+  column <- common_conditions[i]
+  
+  act.mono[1:24472,column] <- act.mono.ifn[,which(colnames(act.mono.ifn)==column)] +
+    act.mono.nfkb[,which(colnames(act.mono.nfkb)==column)] +
+    act.mono.nfkb.ifn[,which(colnames(act.mono.nfkb.ifn)==column)]
+}
+rownames(act.mono) <- rownames(act.mono.ifn)
+
+```
+
+```{r}
+# deseq
+
+counts <- act.mono %>% 
+  select(c(starts_with("sporozoite_infected"), starts_with("sporozoite_bystander")))
+
+# 2 Generate metadata
+colData <- data.frame(sample = colnames(counts))
+colData$condition = sapply(str_split(colData$sample, "D"), function(x) x[1])
+colData <- colData %>% 
+  column_to_rownames("sample")
+
+# more info for metadata
+
+# DEseq2 object
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                             colData = colData,
+                             design = ~condition)
+
+# filter dds
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+
+# Transform counts for data visualization
+rld <- rlog(dds, blind=F)
+
+# Plot PCA
+DESeq2::plotPCA(rld, ntop = 500, intgroup = "condition")
+
+# Extract the rlog matrix from the object and compute pairwise correlation values
+rld_mat <- assay(rld)
+rld_cor <- cor(rld_mat)
+
+# Plot heatmap
+pheatmap(rld_cor, annotation = colData[, c("condition"), drop=F])
+
+# check the coefficients
+resultsNames(dds)
+comparison <- resultsNames(dds)[2]
+
+res <- results(dds, name = comparison, alpha = 0.05)
+# res <- res <- lfcShrink(dds, 
+#                  coef =  comparison,
+#                  res=res)
+res
+
+
+# Turn the DESeq2 results object into a tibble for use with tidyverse functions
+res_tbl <- res %>%
+  data.frame() %>%
+  rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  arrange(pvalue)
+
+# Check results output
+res_tbl 
+
+# Write all results to file
+# write.csv(res_tbl,
+#           paste0(comparison,".csv"),
+#           quote = FALSE, 
+#           row.names = FALSE)
+
+####
+padj_cutoff <- 0.05
+
+# Subset the significant results
+sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff) %>%
+  dplyr::arrange(padj)
+
+# Check significant genes output
+sig_res
+
+# Write all results to file
+# write.csv(sig_res,
+#           paste0(comparison,".csv"),
+#           quote = FALSE, 
+#           row.names = FALSE)
+
+## Extract normalized counts from dds object
+normalized_counts <- counts(dds, normalized = TRUE)
+
+## Extract normalized counts for significant genes only
+sig_counts <- normalized_counts[rownames(normalized_counts) %in% sig_res$gene, ]
+
+## Set a color-blind friendly palette
+heat_colors <- rev(brewer.pal(11, "PuOr"))
+
+## Run pheatmap using the metadata data frame for the annotation
+pheatmap(sig_counts, 
+         color = heat_colors, 
+         cluster_rows = TRUE, 
+         show_rownames = F,
+         annotation = colData, 
+         border_color = NA, 
+         fontsize = 10, 
+         scale = "row", 
+         fontsize_row = 3, 
+         height = 20)  
+
+png("pheatmap_SPZ_infected_vs_bystander.png", width = 40, height = 30, units = "cm", res = 300)
+pheatmap(sig_counts, 
+         color = heat_colors, 
+         cluster_rows = TRUE, 
+         show_rownames = T,
+         annotation = colData, 
+         border_color = NA, 
+         fontsize = 10, 
+         scale = "row", 
+         fontsize_row = 7, 
+         height = 20)  
+dev.off()
+
+```
+```{r}
+# gene set enrichment analysis
+
+
+```

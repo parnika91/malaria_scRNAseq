@@ -1,0 +1,491 @@
+---
+title: "CellBender QC comparison"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+  toc: TRUE
+---
+
+```{r opts, echo = F}
+knitr::opts_chunk$set(warning = F, message = F)
+# knitr::opts_chunk$set(fig.pos = "!H", out.extra = "")
+#knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80),tidy=TRUE)
+
+```
+```{r load_libraries, echo = F, message = F, warning = F}
+library(Seurat)
+library(patchwork)
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+library(broom)
+library(stringr)
+library(ggplot2)
+library(cowplot)
+library(RColorBrewer)
+library(ggh4x)
+#remotes::install_github('chris-mcginnis-ucsf/DoubletFinder')
+#library(DoubletFinder)
+# devtools::install_github("satijalab/seurat-data")
+# devtools::install_github("satijalab/azimuth")
+# library(Azimuth)
+# library(SeuratData)
+```
+
+
+```{r demultiplex_functions, eval = F}
+
+# install / upgrade vireoSNP using pip install --upgrade --no-deps vireoSNP
+# vireo to check installation errors
+# download all cellSNP file from library -> save vcf file as .gz, leave others un-gzipped
+# error: index out of range -> solved by downloading the files again and redoing vireo
+# command line: vireo -c cellSNP_mat/ -N 5 -o vireo_result/
+
+# add vireo output to meta data
+demultiplex <- function(seurat_object)
+{
+  mono.demul <- seurat_object
+  snp <- read.delim(paste("../counts/",lib_name,"/vireo_result/donor_ids.tsv", sep = ""))
+  meta <- mono.demul@meta.data %>% 
+    tibble::rownames_to_column("cell") %>% 
+    left_join(snp)
+
+  table(meta$donor_id)
+# remove doublets and unassigned
+  mono.demul@meta.data <- meta
+
+  Idents(mono.demul) <- "donor_id"
+  mono.singlet.donor <- mono.demul@meta.data %>% 
+    as.data.frame() %>% 
+    tibble::column_to_rownames("cell")
+  
+  mono.demul@meta.data <- mono.singlet.donor
+  
+  ## didn't need the next line for CellBender output:
+  mono.singlet.donor <- subset(x = mono.demul, idents = c("doublet", "unassigned"), invert = T)
+  
+  #Cell Hashing uses oligo-tagged antibodies against ubuquitously expressed surface proteins to place a “sample barcode” on each single cell, enabling different samples to be multiplexed together and run in a single experiment.
+  
+  # Select cell barcodes detected by both RNA and HTO In the example datasets we have already
+  # filtered the cells for you, but perform this step for clarity.
+  
+  joint.bcs <- intersect(rownames(mono.singlet.donor@meta.data), colnames(hto))
+
+  # identical(colnames(pbmc@assays$RNA), rownames(pbmc@meta.data))
+  # [1] TRUE
+  
+  # Subset RNA and HTO counts by joint cell barcodes
+  #pbmc@assays$RNA <- pbmc@assays$RNA[, joint.bcs]
+  mono.hto <- as.matrix(hto[,joint.bcs])
+  
+  ## # Add HTO data as a new assay independent from RNA
+  mono.singlet.donor[["HTO"]] <- CreateAssayObject(counts = mono.hto)
+  
+  # Normalize HTO data, here we use centered log-ratio (CLR) transformation
+  mono.singlet.donor <- NormalizeData(mono.singlet.donor, assay = "HTO", normalization.method = "CLR")
+  
+  # If you have a very large dataset we suggest using k_function = 'clara'. This is a k-medoid
+  # clustering function for large applications You can also play with additional parameters (see
+  # documentation for HTODemux()) to adjust the threshold for classification Here we are using
+  # the default settings
+  mono.singlet.donor <- MULTIseqDemux(mono.singlet.donor, assay = "HTO") #, positive.quantile = 0.99
+  
+  # Global classification results
+  #table(mono.singlet.donor$HTO_classification.global)
+  #table(mono.singlet.donor$MULTI_classification)
+
+  #Idents(mono.singlet.donor) <- "HTO_maxID"
+  #RidgePlot(mono, assay = "HTO", features = rownames(mono[["HTO"]]), ncol = 3)
+  
+  #Idents(mono.singlet.donor) <- "HTO_classification.global"
+  Idents(mono.singlet.donor) <- "MULTI_classification"
+  # VlnPlot(mono.singlet.donor, features = c("nFeature_RNA", "nCount_RNA"), pt.size = 0.1, log = TRUE)
+  # VlnPlot(mono.singlet.donor, features = c("percent.mt", "percent.plasmo"), pt.size = 0.1, log = TRUE)
+  mono.h <- mono.singlet.donor
+  
+  # First, we will remove negative cells from the object
+  # if(any(mono.h$HTO_classification.global == "Negative") == T)
+  #   mono.h <- subset(mono.h, idents = c("Negative"), invert = TRUE)
+  
+  if(any(mono.h$MULTI_classification == "Negative") == T)
+     mono.h <- subset(mono.h, idents = c("Negative"), invert = TRUE)
+  
+  # Calculate a tSNE embedding of the HTO data
+  # DefaultAssay(mono.h) <- "HTO"
+  # mono.h <- ScaleData(mono.h, features = rownames(mono.h),
+  #     verbose = FALSE)
+  # mono.h <- RunPCA(mono.h, features = rownames(mono.h), approx = FALSE)
+  # mono.h <- RunTSNE(mono.h, check_duplicates = F)
+  #Idents(mono.h) <- 'MULTI_classification'
+  #DimPlot(mono.h)
+  
+  donorid <- samplesheet %>% 
+    filter(Library_name == lib_name) %>% 
+    dplyr::rename(MULTI_classification = Antibody) %>% 
+    mutate(MULTI_classification = gsub("_", "-", MULTI_classification)) %>%
+    dplyr::rename(Group = `Patient Group`) %>% 
+    select(Group, MULTI_classification) %>% 
+    distinct()
+  
+  mono.demul <- mono.h
+  mono.demul@meta.data <- mono.demul@meta.data %>% 
+    left_join(., donorid)
+  
+  rownames(mono.demul@meta.data) <- rownames(mono.h@meta.data)#rownames(mono.singlet@meta.data)
+  mono.singlet.donor <- mono.demul
+  
+  Idents(mono.singlet.donor) = "MULTI_classification"
+  
+  hashtags <- gsub("Total_Seq", "TotalSeq", hto_used)
+  hashtags <- gsub("_", "-", hashtags)
+  
+  mono.singlet.donor@meta.data <- mono.singlet.donor@meta.data %>%
+    mutate(Cell_state = case_when(
+      as.character(MULTI_classification) %in% hashtags ~ "Singlet",
+      .default = MULTI_classification
+    ))
+  
+  Idents(mono.singlet.donor) <- "Cell_state"
+  mono.singlet <- subset(mono.singlet.donor, idents = "Singlet")
+  #mono.singlet
+  
+  # # Select the top 1000 most variable features
+  # mono.singlet <- FindVariableFeatures(mono.singlet)
+  # 
+  # # Scaling RNA data, we only scale the variable features here for efficiency
+  # mono.singlet <- ScaleData(mono.singlet, features = VariableFeatures(mono.singlet))
+  # 
+  # # Run PCA
+  # mono.singlet <- RunPCA(mono.singlet, features = VariableFeatures(mono.singlet))
+  # 
+  # # We select the top 10 PCs for clustering and tSNE based on PCElbowPlot
+  # mono.singlet <- FindNeighbors(mono.singlet, reduction = "pca", dims = 1:3)
+  # mono.singlet <- FindClusters(mono.singlet, resolution = 0.6, verbose = FALSE)
+  # mono.singlet <- RunTSNE(mono.singlet, reduction = "pca", dims = 1:3)
+  
+  return(mono.singlet)
+
+}
+# mono.demul@meta.data <- mono.demul@meta.data %>% 
+#   dplyr::rename(HTO_classification = MULTI_classification)
+
+```
+
+```{r processing_lib_function, eval = F}
+processing_lib <- function(lib_name)
+{
+  samplesheet <- read_excel("../Data/a_2022_Malaria_samples_scRNAseq_nucleotide_sequencing.xlsx")
+  colnames(samplesheet) <- samplesheet[1,]
+  samplesheet <- samplesheet[-1,]
+  colnames(samplesheet)[34] <- "Library_name"
+  colnames(samplesheet)[1] <- "Condition_name"
+  colnames(samplesheet)[15] <- "Protocol1"
+  colnames(samplesheet)[21] <- "Protocol2"
+  colnames(samplesheet)[35] <- "Protocol3"
+  colnames(samplesheet)[36] <- "Perform Date2"
+  
+  # table(samplesheet$`Multiplex Tag`, samplesheet$Library_name)
+  # 
+  # table(samplesheet$Condition_name, samplesheet$Library_name)
+  # 
+  libraries <- unique(samplesheet$Library_name)
+  # 
+  #lib_name = "EXP2_l3"
+  d <- samplesheet %>% filter(Library_name == lib_name)
+  
+  
+  # Antibody column needs to be changed from Total_Seq to TotalSeq
+  samplesheet <- samplesheet %>% 
+    mutate(Antibody = gsub("Total_Seq", "TotalSeq", `Multiplex Tag`))
+  
+  hto_used = samplesheet %>%
+    filter(Library_name == lib_name) %>%
+    pull(Antibody) %>%
+    unique
+  
+  # Load the PBMC dataset
+  if(lib_name == "EXP2_l2")
+  {
+    filtered_data <- Read10X(data.dir = paste0("../counts/",lib_name,"_reseq/filtered_feature_bc_matrix/"))
+  }else{
+    filtered_data <- Read10X(data.dir = paste0("../counts/",lib_name,"/filtered_feature_bc_matrix/"))
+  }
+  # for CellBender, do on cmd:
+  # ptrepack --complevel 5 raw_EXP2_l3_cellbender_out.h5:/matrix raw_cellbender_EXP2_l3_out_seurat.h5:/matrix
+  
+  gex <- filtered_data[[1]]
+  hto <- filtered_data[[2]][rownames(filtered_data[[2]]) %in% hto_used, ]
+  
+  # remove SCoV2 genes
+  # plasmo.gex <- gex[grep(rownames(gex), pattern = "^gene-PF3D7-"),] # assay with Plasmodium genes
+  # human.gex <- gex[grep(rownames(gex), pattern = "^gene-PF3D7-", invert = T),]
+  
+  
+  # Initialize the Seurat object with the raw (non-normalized data).
+  #mono <- CreateSeuratObject(counts = gex, project = lib_name, min.cells = 3, min.features = 200)
+  filtered_mono <- CreateSeuratObject(counts = gex, project = paste0("filtered_",lib_name), min.cells = 3, min.features = 200)
+  # filtered_mono
+  # head(filtered_mono@meta.data, 5)
+  
+  # output from Cellbender:
+  if(lib_name == "EXP2_l2")
+  {
+    raw_cellbender_data <- Read10X_h5(filename = paste0("../counts/",lib_name,"_reseq/h5/raw_cellbender_",lib_name, "_out_seurat.h5"))
+  }else{
+    raw_cellbender_data <- Read10X_h5(filename = paste0("../counts/",lib_name,"/h5/raw_cellbender_",lib_name, "_out_seurat.h5"))
+  }
+  
+  gex <- raw_cellbender_data[[1]]
+  hto <- raw_cellbender_data[[2]][rownames(raw_cellbender_data[[2]]) %in% hto_used, ]
+  
+  # remove SCoV2 genes
+  # plasmo.gex <- gex[grep(rownames(gex), pattern = "^gene-PF3D7-"),] # assay with Plasmodium genes
+  # human.gex <- gex[grep(rownames(gex), pattern = "^gene-PF3D7-", invert = T),]
+  
+  # Initialize the Seurat object with the raw (non-normalized data).
+  #mono <- CreateSeuratObject(counts = gex, project = lib_name, min.cells = 3, min.features = 200)
+  cellbender_mono <- CreateSeuratObject(counts = gex, project = paste0("CellBender_",lib_name), min.cells = 3, min.features = 200)
+  # cellbender_mono
+  # head(cellbender_mono@meta.data, 5)
+  
+  filtered_mono[["percent.mt"]] <- PercentageFeatureSet(filtered_mono, pattern = "^MT-")
+  cellbender_mono[["percent.mt"]] <- PercentageFeatureSet(cellbender_mono, pattern = "^MT-")
+  #head(mono$percent.mt)
+  
+  # Plasmo genes
+  filtered_mono[["percent.plasmo"]] <- PercentageFeatureSet(filtered_mono, pattern = "^gene-PF3D7_")
+  cellbender_mono[["percent.plasmo"]] <- PercentageFeatureSet(cellbender_mono, pattern="^gene-PF3D7_")
+  filtered_mono <- demultiplex(filtered_mono)
+  cellbender_mono <- demultiplex(cellbender_mono)
+  
+  return(list(filtered = filtered_mono, cellbender = cellbender_mono))
+}
+
+# saveRDS(EXP1_l1, "robjects/EXP1_l1_cellbender_comparison.rds")
+# saveRDS(EXP1_l2, "robjects/EXP1_l2_cellbender_comparison.rds")
+# saveRDS(EXP2_l1, "robjects/EXP2_l1_cellbender_comparison.rds")
+# saveRDS(EXP2_l2, "robjects/EXP2_l2_cellbender_comparison.rds")
+# saveRDS(EXP2_l3, "robjects/EXP2_l3_cellbender_comparison.rds")
+```
+
+
+```{r, eval = F}
+EXP1_l1 <- processing_lib(lib_name = "EXP1_l1")
+EXP1_l2 <- processing_lib(lib_name = "EXP1_l2")
+EXP2_l1 <- processing_lib(lib_name = "EXP2_l1")
+EXP2_l2 <- processing_lib(lib_name = "EXP2_l2")
+EXP2_l3 <- processing_lib(lib_name = "EXP2_l3")
+```
+
+```{r}
+EXP1_l1 <- readRDS("robjects/EXP1_l1_cellbender_comparison.rds")
+EXP1_l2 <- readRDS("robjects/EXP1_l2_cellbender_comparison.rds")
+EXP2_l1 <- readRDS("robjects/EXP2_l1_cellbender_comparison.rds")
+EXP2_l2 <- readRDS("robjects/EXP2_l2_cellbender_comparison.rds")
+EXP2_l3 <- readRDS("robjects/EXP2_l3_cellbender_comparison.rds")
+```
+
+
+```{r}
+# data frame
+# 1. Put filtered and cellbender calculations together
+EXP1_l1 <- rbind(EXP1_l1$filtered@meta.data, 
+                 EXP1_l1$cellbender@meta.data)
+
+EXP1_l1_longer <- EXP1_l1 %>% 
+  tibble::rownames_to_column("Cell") %>% 
+  pivot_longer(
+  cols = nCount_RNA:percent.plasmo,
+  names_to = "characteristic",
+  values_to = "value"
+)
+```
+
+```{r}
+# plot
+EXP1_l1_longer %>% 
+  filter(grepl(pattern = "filtered", orig.ident)) %>% 
+ggplot(aes(x = value)) + 
+  geom_histogram(bins = 60, colour = "navyblue", fill = "white") + #binwidth = 50
+  facet_grid2(vars(characteristic), vars(Group), 
+             scales = "free", 
+             independent = "x",
+             space = "free_x") +
+  theme_bw()+
+  ggtitle("EXP1_l1_filtered")
+
+EXP1_l1_longer %>% 
+  filter(grepl(pattern = "CellBender", orig.ident)) %>% 
+ggplot(aes(x = value)) + 
+  geom_histogram(bins = 60, colour = "darkred", fill = "white") + #binwidth = 50
+  facet_grid2(vars(characteristic), vars(Group), 
+             scales = "free", 
+             independent = "x",
+             space = "free_x") +
+  theme_bw()+
+  ggtitle("EXP1_l1_cellbender")
+```
+
+```{r}
+# data frame
+# 1. Put filtered and cellbender calculations together
+EXP1_l2 <- rbind(EXP1_l2$filtered@meta.data, 
+                 EXP1_l2$cellbender@meta.data)
+
+EXP1_l2_longer <- EXP1_l2 %>% 
+  tibble::rownames_to_column("Cell") %>% 
+  pivot_longer(
+  cols = nCount_RNA:percent.plasmo,
+  names_to = "characteristic",
+  values_to = "value"
+)
+```
+
+```{r}
+# plot
+EXP1_l2_longer %>% 
+  filter(grepl(pattern = "filtered", orig.ident)) %>% 
+ggplot(aes(x = value)) + 
+  geom_histogram(bins = 60, colour = "navyblue", fill = "white") + #binwidth = 50
+  facet_grid2(vars(characteristic), vars(Group), 
+             scales = "free", 
+             independent = "x",
+             space = "free_x") +
+  theme_bw()+
+  ggtitle("EXP1_l2_filtered")
+
+EXP1_l2_longer %>% 
+  filter(grepl(pattern = "CellBender", orig.ident)) %>% 
+ggplot(aes(x = value)) + 
+  geom_histogram(bins = 60, colour = "darkred", fill = "white") + #binwidth = 50
+  facet_grid2(vars(characteristic), vars(Group), 
+             scales = "free", 
+             independent = "x",
+             space = "free_x") +
+  theme_bw()+
+  ggtitle("EXP1_l2_cellbender")
+```
+
+
+```{r}
+# data frame
+# 1. Put filtered and cellbender calculations together
+EXP2_l1 <- rbind(EXP2_l1$filtered@meta.data, 
+                 EXP2_l1$cellbender@meta.data)
+
+EXP2_l1_longer <- EXP2_l1 %>% 
+  tibble::rownames_to_column("Cell") %>% 
+  pivot_longer(
+  cols = nCount_RNA:percent.plasmo,
+  names_to = "characteristic",
+  values_to = "value"
+)
+```
+
+```{r}
+# plot
+EXP2_l1_longer %>% 
+  filter(grepl(pattern = "filtered", orig.ident)) %>% 
+ggplot(aes(x = value)) + 
+  geom_histogram(bins = 60, colour = "navyblue", fill = "white") + #binwidth = 50
+  facet_grid2(vars(characteristic), vars(Group), 
+             scales = "free", 
+             independent = "x",
+             space = "free_x") +
+  theme_bw()+
+  ggtitle("EXP2_l1_filtered")
+
+EXP2_l1_longer %>% 
+  filter(grepl(pattern = "CellBender", orig.ident)) %>% 
+ggplot(aes(x = value)) + 
+  geom_histogram(bins = 60, colour = "darkred", fill = "white") + #binwidth = 50
+  facet_grid2(vars(characteristic), vars(Group), 
+             scales = "free", 
+             independent = "x",
+             space = "free_x") +
+  theme_bw()+
+  ggtitle("EXP2_l1_cellbender")
+```
+
+```{r}
+# data frame
+# 1. Put filtered and cellbender calculations together
+EXP2_l2 <- rbind(EXP2_l2$filtered@meta.data, 
+                 EXP2_l2$cellbender@meta.data)
+
+EXP2_l2_longer <- EXP2_l2 %>% 
+  tibble::rownames_to_column("Cell") %>% 
+  pivot_longer(
+  cols = nCount_RNA:percent.plasmo,
+  names_to = "characteristic",
+  values_to = "value"
+)
+```
+
+```{r}
+EXP2_l2_longer %>% 
+  filter(grepl(pattern = "filtered", orig.ident)) %>% 
+ggplot(aes(x = value)) + 
+  geom_histogram(bins = 60, colour = "navyblue", fill = "white") + #binwidth = 50
+  facet_grid2(vars(characteristic), vars(Group), 
+             scales = "free", 
+             independent = "x",
+             space = "free_x") +
+  theme_bw()+
+  ggtitle("EXP2_l2_filtered")
+
+EXP2_l2_longer %>% 
+  filter(grepl(pattern = "CellBender", orig.ident)) %>% 
+ggplot(aes(x = value)) + 
+  geom_histogram(bins = 60, colour = "darkred", fill = "white") + #binwidth = 50
+  facet_grid2(vars(characteristic), vars(Group), 
+             scales = "free", 
+             independent = "x",
+             space = "free_x") +
+  theme_bw()+
+  ggtitle("EXP2_l2_cellbender")
+```
+
+```{r}
+# data frame
+# 1. Put filtered and cellbender calculations together
+EXP2_l3 <- rbind(EXP2_l3$filtered@meta.data, 
+                 EXP2_l3$cellbender@meta.data)
+
+EXP2_l3_longer <- EXP2_l3 %>% 
+  tibble::rownames_to_column("Cell") %>% 
+  pivot_longer(
+  cols = nCount_RNA:percent.plasmo,
+  names_to = "characteristic",
+  values_to = "value"
+)
+```
+
+```{r}
+# plot
+EXP2_l3_longer %>% 
+  filter(grepl(pattern = "filtered", orig.ident)) %>% 
+ggplot(aes(x = value)) + 
+  geom_histogram(bins = 60, colour = "navyblue", fill = "white") + #binwidth = 50
+  facet_grid2(vars(characteristic), vars(Group), 
+             scales = "free", 
+             independent = "x",
+             space = "free_x") +
+  theme_bw()+
+  ggtitle("EXP2_l3_filtered")
+
+EXP2_l3_longer %>% 
+  filter(grepl(pattern = "CellBender", orig.ident)) %>% 
+ggplot(aes(x = value)) + 
+  geom_histogram(bins = 60, colour = "darkred", fill = "white") + #binwidth = 50
+  facet_grid2(vars(characteristic), vars(Group), 
+             scales = "free", 
+             independent = "x",
+             space = "free_x") +
+  theme_bw()+
+  ggtitle("EXP2_l3_cellbender")
+```

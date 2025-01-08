@@ -1,0 +1,705 @@
+---
+title: "Dual organism analysis - pseudobulk RNA-seq Act. vs Inact. Mono - malaria"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+  toc: TRUE
+---
+
+
+```{r setup, include=T} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(fig.width = 10, fig.height = 8) 
+```
+
+```{r}
+library(Seurat)
+library(patchwork)
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+library(broom)
+library(stringr)
+library(ggplot2)
+library(SeuratData)
+#library(celldex)
+#install.packages("cowplot")
+library(cowplot)
+#devtools::install_github('cole-trapnell-lab/monocle3')
+library(monocle3)
+#remotes::install_github('satijalab/seurat-wrappers')
+library(SeuratWrappers)
+#BiocManager::install('multtest', force = T)
+library(multtest)
+library(RColorBrewer)
+library(rtracklayer)
+library(DESeq2)
+library(MatrixModels)
+library(org.Hs.eg.db)
+library(topGO)
+library(clusterProfiler)
+# install.packages('metap')
+#library(metap)
+#remotes::install_github("satijalab/seurat-data")
+
+```
+
+```{r functions}
+my_PseudobulkExpression <- function(
+  object,
+  pb.method = 'aggregate',
+  assays = NULL,
+  features = NULL,
+  return.seurat = FALSE,
+  group.by = 'ident',
+  add.ident = NULL,
+  slot = 'data',
+  verbose = TRUE,
+  ...
+) {
+  # CheckDots(..., fxns = 'CreateSeuratObject')
+  # if (!is.null(x = add.ident)) {
+  #   .Deprecated(msg = "'add.ident' is a deprecated argument, please use the 'group.by' argument instead")
+  #   group.by <- c('ident', add.ident)
+  # }
+  # if (!(pb.method %in% c('average', 'aggregate'))) {
+  #   stop("'pb.method' must be either 'average' or 'aggregate'")
+  # }
+  object.assays <- FilterObjects(object = object, classes.keep = 'Assay')
+  assays <- assays %||% object.assays
+  if (!all(assays %in% object.assays)) {
+    assays <- assays[assays %in% object.assays]
+    if (length(x = assays) == 0) {
+      stop("None of the requested assays are present in the object")
+    } else {
+      warning("Requested assays that do not exist in object. Proceeding with existing assays only.")
+    }
+  }
+  if (length(x = slot) == 1) {
+    slot <- rep_len(x = slot, length.out = length(x = assays))
+  } else if (length(x = slot) != length(x = assays)) {
+    stop("Number of slots provided does not match number of assays")
+  }
+  data <- FetchData(object = object, vars = rev(x = group.by))
+  data <- data[which(rowSums(x = is.na(x = data)) == 0), , drop = F]
+  if (nrow(x = data) < ncol(x = object)) {
+    message("Removing cells with NA for 1 or more grouping variables")
+    object <- subset(x = object, cells = rownames(x = data))
+  }
+  for (i in 1:ncol(x = data)) {
+    data[, i] <- as.factor(x = data[, i])
+  }
+  num.levels <- sapply(
+    X = 1:ncol(x = data),
+    FUN = function(i) {
+      length(x = levels(x = data[, i]))
+    }
+  )
+  if (any(num.levels == 1)) {
+    message(paste0("The following grouping variables have 1 value and will be ignored: ",
+                   paste0(colnames(x = data)[which(num.levels <= 1)], collapse = ", ")))
+    group.by <- colnames(x = data)[which(num.levels > 1)]
+    data <- data[, which(num.levels > 1), drop = F]
+  }
+  if (ncol(x = data) == 0) {
+    message("All grouping variables have 1 value only. Computing across all cells.")
+    category.matrix <- matrix(
+      data = 1,
+      nrow = ncol(x = object),
+      dimnames = list(Cells(x = object), 'all')
+    )
+    if (pb.method == 'average') {
+      category.matrix <- category.matrix / sum(category.matrix)
+    }
+  } else {
+    category.matrix <- model.Matrix(object = as.formula(
+      object = paste0(
+        '~0+',
+        paste0(
+          "data[,",
+          1:length(x = group.by),
+          "]",
+          collapse = ":"
+        )
+      )
+    ))
+    colsums <- colSums(x = category.matrix)
+    category.matrix <- category.matrix[, colsums > 0]
+    colsums <- colsums[colsums > 0]
+    if (pb.method == 'average') {
+      category.matrix <- Sweep(
+        x = category.matrix,
+        MARGIN = 2,
+        STATS = colsums,
+        FUN = "/")
+    }
+    colnames(x = category.matrix) <- sapply(
+      X = colnames(x = category.matrix),
+      FUN = function(name) {
+        name <- gsub(pattern = "data\\[, [1-9]*\\]", replacement = "", x = name)
+        return(paste0(rev(x = unlist(x = strsplit(x = name, split = ":"))), collapse = "_"))
+      })
+  }
+  data.return <- list()
+  for (i in 1:length(x = assays)) {
+    data.use <- GetAssayData(
+      object = object,
+      assay = assays[i],
+      slot = slot[i]
+    )
+    features.to.avg <- features %||% rownames(x = data.use)
+    if (inherits(x = features, what = "list")) {
+      features.to.avg <- features[i]
+    }
+    if (IsMatrixEmpty(x = data.use)) {
+      warning(
+        "The ", slot[i], " slot for the ", assays[i],
+        " assay is empty. Skipping assay.", immediate. = TRUE, call. = FALSE)
+      next
+    }
+    bad.features <- setdiff(x = features.to.avg, y = rownames(x = data.use))
+    if (length(x = bad.features) > 0) {
+      warning(
+        "The following ", length(x = bad.features),
+        " features were not found in the ", assays[i], " assay: ",
+        paste(bad.features, collapse = ", "), call. = FALSE, immediate. = TRUE)
+    }
+    features.assay <- intersect(x = features.to.avg, y = rownames(x = data.use))
+    if (length(x = features.assay) > 0) {
+      data.use <- data.use[features.assay, ]
+    } else {
+      warning("None of the features specified were found in the ", assays[i],
+              " assay.", call. = FALSE, immediate. = TRUE)
+      next
+    }
+    if (slot[i] == 'data') {
+      data.use <- expm1(x = data.use)
+      if (any(data.use == Inf)) {
+        warning("Exponentiation yielded infinite values. `data` may not be log-normed.")
+      }
+    }
+    data.return[[i]] <- as.matrix(x = (data.use %*% category.matrix))
+    names(x = data.return)[i] <- assays[[i]]
+  }
+  if (return.seurat) {
+    if (slot[1] == 'scale.data') {
+      na.matrix <- data.return[[1]]
+      na.matrix[1:length(x = na.matrix)] <- NA
+      toRet <- CreateSeuratObject(
+        counts = na.matrix,
+        project = if (pb.method == "average") "Average" else "Aggregate",
+        assay = names(x = data.return)[1],
+        check.matrix = FALSE,
+        ...
+      )
+      toRet <- SetAssayData(
+        object = toRet,
+        assay = names(x = data.return)[1],
+        slot = "counts",
+        new.data = matrix()
+      )
+      toRet <- SetAssayData(
+        object = toRet,
+        assay = names(x = data.return)[1],
+        slot = "data",
+        new.data = na.matrix
+      )
+      toRet <- SetAssayData(
+        object = toRet,
+        assay = names(x = data.return)[1],
+        slot = "scale.data",
+        new.data = data.return[[1]]
+      )
+    } else {
+      toRet <- CreateSeuratObject(
+        counts = data.return[[1]],
+        project = if (pb.method == "average") "Average" else "Aggregate",
+        assay = names(x = data.return)[1],
+        check.matrix = FALSE,
+        ...
+      )
+      toRet <- SetAssayData(
+        object = toRet,
+        assay = names(x = data.return)[1],
+        slot = "data",
+        new.data = log1p(x = as.matrix(x = data.return[[1]]))
+      )
+    }
+    #for multimodal data
+    if (length(x = data.return) > 1) {
+      for (i in 2:length(x = data.return)) {
+        if (slot[i] == 'scale.data') {
+          na.matrix <- data.return[[i]]
+          na.matrix[1:length(x = na.matrix)] <- NA
+          toRet[[names(x = data.return)[i]]] <- CreateAssayObject(counts = na.matrix, check.matrix = FALSE)
+          toRet <- SetAssayData(
+            object = toRet,
+            assay = names(x = data.return)[i],
+            slot = "counts",
+            new.data = matrix()
+          )
+          toRet <- SetAssayData(
+            object = toRet,
+            assay = names(x = data.return)[i],
+            slot = "data",
+            new.data = na.matrix
+          )
+          toRet <- SetAssayData(
+            object = toRet,
+            assay = names(x = data.return)[i],
+            slot = "scale.data",
+            new.data = as.matrix(x = data.return[[i]])
+          )
+        } else {
+          toRet[[names(x = data.return)[i]]] <- CreateAssayObject(counts = data.return[[i]], check.matrix = FALSE)
+          toRet <- SetAssayData(
+            object = toRet,
+            assay = names(x = data.return)[i],
+            slot = "data",
+            new.data = log1p(x = as.matrix(x = data.return[[i]]))
+          )
+        }
+
+      }
+    }
+    if (DefaultAssay(object = object) %in% names(x = data.return)) {
+      DefaultAssay(object = toRet) <- DefaultAssay(object = object)
+      if (slot[which(DefaultAssay(object = object) %in% names(x = data.return))[1]] != 'scale.data') {
+        toRet <- ScaleData(object = toRet, verbose = verbose)
+      }
+    }
+    if ('ident' %in% group.by) {
+      first.cells <- c()
+      for (i in 1:ncol(x = category.matrix)) {
+        first.cells <- c(first.cells, Position(x = category.matrix[,i], f = function(x) {x > 0}))
+      }
+      Idents(object = toRet) <- Idents(object = object)[first.cells]
+    }
+    return(toRet)
+  } else {
+    return(data.return)
+  }
+}
+
+de_function_nothr <- function(condition1, condition2)
+{
+  #padj_thr_sc <- padj_thr_sc
+  act.mono <- cts
+  counts <- act.mono %>% 
+    as.data.frame() %>% 
+    dplyr::select(c(starts_with(condition1), starts_with(condition2)))
+
+  # 2 Generate metadata
+  colData <- data.frame(sample = colnames(counts))
+  colData$condition = sapply(str_split(colData$sample, "_D"), function(x) x[1])
+  colData <- colData %>% 
+    tibble::column_to_rownames("sample")
+  
+  # more info for metadata
+  
+  # DEseq2 object
+  dds <- DESeqDataSetFromMatrix(countData = counts,
+                               colData = colData,
+                               design = ~condition)
+  
+  
+  # filter dds
+  keep <- rowSums(counts(dds)) >= 10
+  dds <- dds[keep,]
+  
+  dds$condition <- relevel(dds$condition, ref = condition1)
+  
+  dds <- DESeq(dds)
+  
+  comparison <- resultsNames(dds)[2]
+
+  res <- results(dds, name = comparison)
+  
+  # Turn the DESeq2 results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+    data.frame() %>%
+    rownames_to_column(var = "gene") %>%
+    as_tibble()
+  
+  
+  
+  #write.csv(res_tbl, "iRBC_vs_RBC_scRNAseq.csv", row.names = F, quote = F)
+  ####
+  
+  # # Subset the significant results
+  # sig_res <- dplyr::filter(res_tbl, padj <= padj_thr_sc) %>%
+  #   filter(abs(log2FoldChange) >= logFC_thr) %>% 
+  #   dplyr::arrange(padj)
+  # 
+  # # Check significant genes output
+  # #sig_res
+  # 
+  # ## Extract normalized counts from dds object
+  # normalized_counts <- counts(dds, normalized = TRUE)
+  # 
+  # ## Extract normalized counts for significant genes only
+  # sig_counts <- normalized_counts[rownames(normalized_counts) %in% sig_res$gene, ]
+  # 
+  return(res_tbl)
+  #return(list(dds,sig_counts, sig_res))
+  
+}
+
+### host GO
+host_GO <- function(host, host_nothr)
+{
+  if(host == "Hs")
+  {
+    org.db = org.Hs.eg.db
+  }else{
+    org.db = org.Mm.eg.db
+  }
+  
+  host_nothr_geneList <- host_nothr %>% 
+    filter(!grepl('PF3D7', gene)) %>% 
+    na.omit() %>% 
+    filter(abs(log2FoldChange) > 1.5) %>%
+    filter(padj <= 0.1)
+  host_nothr_geneList_ENTREZ <- mapIds(org.db, host_nothr_geneList$gene, 'ENTREZID', 'SYMBOL')
+  
+  universe <- host_nothr %>% 
+    filter(!grepl('PF3D7', gene)) %>% 
+    na.omit()
+  universe_ENTREZ <- mapIds(org.db, universe$gene, 'ENTREZID', 'SYMBOL')
+  
+  # host_nothr_geneList_ <- host_nothr_geneList$log2FoldChange
+  # names(host_nothr_geneList_) <-  host_nothr_geneList$gene
+  # 
+  # host_nothr_geneList_sorted <- sort(host_nothr_geneList_, decreasing = T)
+  # names(host_nothr_geneList_sorted) <- mapIds(org.db, names(host_nothr_geneList_sorted), 'ENTREZID', 'SYMBOL')
+  
+  host_nothr_ego <- enrichGO(gene = host_nothr_geneList_ENTREZ,
+                              #geneList     = host_nothr_geneList_sorted,
+                             #keytype = "SYMBOL",
+                             universe = universe_ENTREZ,
+                OrgDb        = org.db,
+                #eps = 0,
+                ont          = "BP",
+                minGSSize    = 10,
+                maxGSSize    = 500,
+                pvalueCutoff = 0.05,
+                #verbose      = FALSE,
+                readable = T)
+  
+  #host_nothr_ego <- setReadable(host_nothr_ego, OrgDb = org.db)
+  
+  return(host_nothr_ego)
+}
+
+### Plasmo GO
+
+plasmo_GO <- function(plasmo_nothr)
+{
+  pf_nothr_pos_log2fc_geneList <- plasmo_nothr %>% 
+    filter(grepl('PF3D7', gene)) %>% 
+    na.omit() %>% 
+    filter(log2FoldChange > 1.5) %>% 
+    filter(padj <= 0.1) %>% 
+    mutate(gene = gsub("gene-", "", gene)) %>% 
+    mutate(gene = gsub("-", "_", gene))
+
+  pf_nothr_neg_log2fc_geneList <- plasmo_nothr %>% 
+    filter(grepl('PF3D7', gene)) %>% 
+    na.omit() %>% 
+    filter(log2FoldChange < -1.5) %>% 
+    filter(padj <= 0.1)  %>% 
+    mutate(gene = gsub("gene-", "", gene)) %>% 
+    mutate(gene = gsub("-", "_", gene))
+  
+  pf_nothr_neg_log2fc_geneList_ <- pf_nothr_neg_log2fc_geneList$log2FoldChange
+  names(pf_nothr_neg_log2fc_geneList_) <-  pf_nothr_neg_log2fc_geneList$gene
+  
+  # Plasmodium GO terms
+  para_genes_neg <- names(pf_nothr_neg_log2fc_geneList_)
+  
+  
+  ######## correct way to write the annot file from gaf #########
+  # gaf <- read.delim("~/Downloads/PlasmoDB-64_Pfalciparum3D7_GO.gaf", 
+  #                   header = F, 
+  #                   stringsAsFactors = F,
+  #                   comment = "!") %>% 
+  #   select(V2, V5) %>% 
+  #   rename(geneID = V2, GOterm = V5)
+  # 
+  # gaf <- aggregate(gaf$GOterm, gaf['geneID'], paste0, collape = "")
+  # gaf$GO <- sapply(gaf$x, function(y) paste0(unique(unlist(y)), collapse = ","))
+  # gaf <- gaf[,c(1,3)]
+  # colnames(gaf) <- NULL
+  # 
+  # write.table(gaf, "../Data/PlasmoDB-64_Pfalciparum3D7_GO.txt", sep = '\t', row.names = F, quote = F)
+  ################
+  IDconvert <- read.delim("../Data/PlasmoDB-64_Pfalciparum3D7_GO.gaf", 
+                header = F, 
+                stringsAsFactors = F,
+                comment = "!")
+  
+  geneID2GO <- readMappings("../Data/PlasmoDB-64_Pfalciparum3D7_GO.txt")
+  # parasite genes of interest
+  para_in_neg <- unique(as.character(para_genes_neg))
+  # universe of parasite genes
+  para_bg <-  plasmo_nothr %>% 
+    filter(grepl('PF3D7', gene)) %>% 
+    na.omit() %>% 
+    # mutate(gene = gsub("gene-", "", gene)) %>% 
+    # mutate(gene = gsub("-", "_", gene)) %>% 
+    pull(gene)
+  # to know which genes are interesting within the universe, we do %in% with background genes
+  geneList_neg = factor(as.integer(para_bg %in% para_in_neg))
+  # make it a named vector, that's what topGO requires
+  names(geneList_neg)= para_bg
+
+  if(length(para_in_neg > 0) > 0)
+  {
+    GOdata_neg <- new("topGOdata",
+                ontology = "BP",
+                allGenes = geneList_neg,
+                annot = annFUN.gene2GO,
+                gene2GO = geneID2GO,
+                nodeSize = 1)
+  # Expected: Under random chance, number of genes that would be expected 
+  # to be significantly DE and annotated with that term
+  # The column Expected represents the expected number of interesting genes mapped to the 
+  # GO term if the interesting genes were randomly distributed over all GO terms.
+  
+  resultKS_neg=runTest(GOdata_neg, algorithm='weight01', statistic='KS') 
+  allGO_neg=usedGO(GOdata_neg)
+  all_res_neg=GenTable(GOdata_neg, KS=resultKS_neg, orderBy="KS", topNodes=length(allGO_neg), numChar = 1000)
+  
+  # Get genes in a particular GO term:
+  
+  
+  GenesForGOterm_neg <- c()
+  myterms_neg = all_res_neg$GO.ID
+  mygenes_neg <- genesInTerm(GOdata_neg, myterms_neg)
+  for (i in 1:length(myterms_neg))
+  {
+    myterm_neg <- mygenes_neg[myterms_neg[i]][[1]]
+    mygenesforterm_neg <- myterm_neg[myterm_neg %in% para_in_neg]
+    genes_neg <- sapply(mygenesforterm_neg,
+                    function(x) paste(x, unique(IDconvert[grep(pattern = x, IDconvert$V2),"V10"]), sep = "-"))
+    genes_neg <- paste(genes_neg, collapse=' ,')
+    GenesForGOterm_neg[i] <- genes_neg
+  }
+
+  all_res_neg$GenesForGOterm_neg <- GenesForGOterm_neg 
+  all_res_neg <- all_res_neg %>% 
+    filter(Significant > 0)
+  
+  }else
+  {all_res_neg <- ""}
+  
+  ### positive
+  pf_nothr_pos_log2fc_geneList_ <- pf_nothr_pos_log2fc_geneList$log2FoldChange
+  names(pf_nothr_pos_log2fc_geneList_) <-  pf_nothr_pos_log2fc_geneList$gene
+  
+  # Plasmodium GO terms
+  para_genes_pos <- names(pf_nothr_pos_log2fc_geneList_)
+  
+  
+  ######## correct way to write the annot file from gaf #########
+  # gaf <- read.delim("~/Downloads/PlasmoDB-64_Pfalciparum3D7_GO.gaf", 
+  #                   header = F, 
+  #                   stringsAsFactors = F,
+  #                   comment = "!") %>% 
+  #   select(V2, V5) %>% 
+  #   rename(geneID = V2, GOterm = V5)
+  # 
+  # gaf <- aggregate(gaf$GOterm, gaf['geneID'], paste0, collape = "")
+  # gaf$GO <- sapply(gaf$x, function(y) paste0(unique(unlist(y)), collapse = ","))
+  # gaf <- gaf[,c(1,3)]
+  # colnames(gaf) <- NULL
+  # 
+  # write.table(gaf, "../Data/PlasmoDB-64_Pfalciparum3D7_GO.txt", sep = '\t', row.names = F, quote = F)
+  ################
+  
+  geneID2GO <- readMappings("../Data/PlasmoDB-64_Pfalciparum3D7_GO.txt")
+  # parasite genes of interest
+  para_in_pos <- unique(as.character(para_genes_pos))
+  # to know which genes are interesting within the universe, we do %in% with background genes
+  geneList_pos = factor(as.integer(para_bg %in% para_in_pos))
+  # make it a named vector, that's what topGO requires
+  names(geneList_pos)= para_bg
+
+  if(length(para_in_pos > 0) > 0)
+  {
+  GOdata_pos <- new("topGOdata",
+                ontology = "BP",
+                allGenes = geneList_pos,
+                annot = annFUN.gene2GO,
+                gene2GO = geneID2GO,
+                nodeSize = 1)
+  # Expected: Under random chance, number of genes that would be expected 
+  # to be significantly DE and annotated with that term
+  # The column Expected represents the expected number of interesting genes mapped to the 
+  # GO term if the interesting genes were randomly distributed over all GO terms.
+  
+  resultKS_pos=runTest(GOdata_pos, algorithm='weight01', statistic='KS') 
+  allGO_pos=usedGO(GOdata_pos)
+  all_res_pos=GenTable(GOdata_pos, KS=resultKS_pos, orderBy="KS", topNodes=length(allGO_pos), numChar = 1000)
+  
+ 
+  GenesForGOterm_pos <- c()
+  myterms_pos = all_res_pos$GO.ID
+  mygenes_pos <- genesInTerm(GOdata_pos, myterms_pos)
+  for (i in 1:length(myterms_pos))
+  {
+    myterm_pos <- mygenes_pos[myterms_pos[i]][[1]]
+    mygenesforterm_pos <- myterm_pos[myterm_pos %in% para_in_pos]
+    genes_pos <- sapply(mygenesforterm_pos,
+                    function(x) paste(x, unique(IDconvert[grep(pattern = x, IDconvert$V2),"V10"]), sep = "-"))
+    genes_pos <- paste(genes_pos, collapse=' ,')
+    GenesForGOterm_pos[i] <- genes_pos
+  }
+
+  all_res_pos$GenesForGOterm_pos <- GenesForGOterm_pos
+  
+  all_res_pos <- all_res_pos %>% 
+    filter(Significant > 0)
+  }else
+  {all_res_pos <- ""}
+  
+  return(list(pf_neg = all_res_neg, pf_pos = all_res_pos))
+}
+
+```
+
+
+```{r}
+dual <- readRDS("robjects/dual.integrated.TBremoved.cellbender_plasmo.bg.removed_reintegration.rds")
+
+DefaultAssay(dual) <- "RNA"
+
+dual@meta.data <- dual@meta.data %>% 
+  mutate(act_inact = case_when(
+    str_detect(predicted.celltype, "Monocytes activated") ~ "Activated",
+    str_detect(predicted.celltype, paste(c("Classical", "Intermediate", "Non-classical"),collapse = '|')) ~ "Unstimulated",
+    predicted.celltype == "?" ~ "?",
+    predicted.celltype == "DCs" ~ "DCs",
+    .default = predicted.celltype
+  )) %>% 
+  mutate(condition_collapse = case_when(
+    (Group == "sporozoite_infected"  | Group == "sporozoite_bystander") ~ "sporozoite_bys_inf",
+    (Group == "RBC_infected" | Group == "RBC_bystander") ~ "RBC_bys_inf",
+    .default = Group
+  ))
+
+
+dual@meta.data$cond_group <- paste(dual@meta.data$condition_collapse,
+                                               dual@meta.data$Donorid,
+                                               sep = "")
+
+dual@meta.data$cond_group <- paste(dual@meta.data$Group,
+                                               dual@meta.data$Donorid,
+                                               sep = "")
+
+# cts <- AggregateExpression(dual,
+#               group.by = c("act_inact", "cond_group"),
+#               assays = "RNA",
+#               slot = "counts",
+#               return.seurat = F)
+
+cts <- my_PseudobulkExpression(dual,
+              group.by = c("predicted.celltype", "Donorid"),
+              assays = "RNA",
+              slot = "counts",
+              pb.method = "aggregate",
+              return.seurat = F)
+
+cts <- cts$RNA
+
+# transpose
+cts.t <- as.data.frame(t(cts))
+
+# split.data.frame
+splitRows <- gsub('_.*', '', rownames(cts.t))
+cts.split <- split.data.frame(cts.t,
+                 f = factor(splitRows))
+
+# fix colnames and transpose
+cts.modified <- lapply(cts.split, function(x){
+  rownames(x) <- gsub("(.+?)(\\_.*)", "\\2", rownames(x))
+  rownames(x) <- gsub("^_", "\\1", rownames(x))
+  t(x)
+})
+
+act.mono <- cts.t %>% 
+  #rownames_to_column("condition") %>% 
+  filter(str_detect(rownames(.), paste(c("Unstimulated", "Activated"),collapse = '|'))) %>% 
+  #column_to_rownames("condition") %>% 
+  t()
+
+#colnames(act.mono) = gsub(x = colnames(act.mono), pattern = "Activated monocytes_", replacement = "")
+```
+
+```{r}
+Act_SPZ_vs_iRBC_human_nothr <- de_function_nothr(condition1 = "Activated_RBC_bys_inf",
+                                 condition2 = "Activated_sporozoite_bys_inf")
+
+Act_vs_unstim_iRBC_human_nothr <- de_function_nothr(condition1 = "Unstimulated_RBC_bys_inf",
+                                 condition2 = "Activated_RBC_bys_inf")
+
+Act_vs_unstim_SPZ_human_nothr <- de_function_nothr(condition1 = "Unstimulated_sporozoite_bys_inf",
+                                 condition2 = "Activated_sporozoite_bys_inf")
+```
+
+```{r}
+ActI_vs_ActII_human_nothr <- de_function_nothr(condition1 = "Activated monocytes I (IL1B CXCL2/1)",
+                                 condition2 = "Activated monocytes II (IFIT2/3, ISG15)")
+
+ActI_vs_ActIII_human_nothr <- de_function_nothr(condition1 = "Activated monocytes I (IL1B CXCL2/1)",
+                                 condition2 = "Activated monocytes III (IL12 CD40 TNF)")
+
+ActII_vs_ActIII_human_nothr <- de_function_nothr(condition1 = "Activated monocytes II (IFIT2/3, ISG15)",
+                                 condition2 = "Activated monocytes III (IL12 CD40 TNF)")
+```
+
+
+```{r}
+Act_SPZ_vs_iRBC_nothr_hs_GO <- host_GO(host = "Hs", host_nothr = Act_SPZ_vs_iRBC_human_nothr)
+Act_SPZ_vs_iRBC_nothr_pf_GO <- plasmo_GO(Act_SPZ_vs_iRBC_human_nothr)
+
+Act_vs_unstim_iRBC_nothr_hs_GO <- host_GO(host = "Hs", host_nothr = Act_vs_unstim_iRBC_human_nothr)
+Act_vs_unstim_iRBC_nothr_pf_GO <- plasmo_GO(Act_vs_unstim_iRBC_human_nothr)
+
+Act_vs_unstim_SPZ_nothr_hs_GO <- host_GO(host = "Hs", host_nothr = Act_vs_unstim_SPZ_human_nothr)
+Act_vs_unstim_SPZ_nothr_pf_GO <- plasmo_GO(Act_vs_unstim_SPZ_human_nothr)
+```
+
+
+```{r}
+
+cts <- my_PseudobulkExpression(dual,
+              group.by = c("act_inact", "Donorid"),
+              assays = "RNA",
+              slot = "counts",
+              pb.method = "aggregate",
+              return.seurat = F)
+
+cts <- cts$RNA
+
+# transpose
+cts.t <- as.data.frame(t(cts))
+rownames(cts.t) <- gsub(pattern = "_", replacement = "", rownames(cts.t))
+
+act.mono <- cts.t %>% 
+  #rownames_to_column("condition") %>% 
+  filter(str_detect(rownames(.), paste(c("Unstimulated", "Activated"),collapse = '|'))) %>% 
+  #column_to_rownames("condition") %>% 
+  t()
+
+Act_vs_unstim_nothr <- de_function_nothr(condition1 = "Unstimulated",
+                                 condition2 = "Activated")
+
+Act_vs_unstim_nothr_pf_GO <- plasmo_GO(Act_vs_unstim_nothr)
+```
+
+

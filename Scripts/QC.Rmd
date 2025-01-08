@@ -1,0 +1,432 @@
+---
+title: "Single cell RNA-seq of Plasmodium sporozoite-infected monocytes - quality control"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  toc: TRUE
+---
+
+```{r, echo = F}
+knitr::opts_chunk$set(warning = F, message = F)
+# knitr::opts_chunk$set(fig.pos = "!H", out.extra = "")
+#knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80),tidy=TRUE)
+
+```
+
+<!-- ```{r load_libraries, echo = F, message = F, warning = F} -->
+<!-- library(Seurat) -->
+<!-- library(patchwork) -->
+<!-- library(readxl) -->
+<!-- library(tidyverse) -->
+<!-- library(ggplot2) -->
+<!-- library(ggpubr) -->
+<!-- library(reshape2) -->
+<!-- library(broom) -->
+<!-- library(stringr) -->
+<!-- # remotes::install_github('chris-mcginnis-ucsf/DoubletFinder') -->
+<!-- # library(DoubletFinder) -->
+<!-- ``` -->
+
+# Step 1: Load filtered features, barcode, matrices and visualise quality
+
+<!-- ```{r} -->
+<!-- # function to remove plasmo genes from each library -->
+<!-- remove_plasmo_bg <- function(lib_name) -->
+<!-- { -->
+<!--   # get cells that belong to control and RBC_control -->
+<!--   # seurat.subset <- subset(x = epithelial, subset = (stim == "Healthy" & stim == "Others") & (another_condition == "Ambigious")) -->
+<!--   cells_in_ctrl_conditions <- subset(lib_name, subset = Group == c("control","RBC_control")) -->
+
+<!--   # get the plasmo genes that are expressed in these conditions -->
+<!--   plasmo.genes.id <- grep(pattern = "gene-PF3D7", rownames(cells_in_ctrl_conditions)) -->
+<!--   plasmo.obj <- cells_in_ctrl_conditions[plasmo.genes.id,] -->
+
+<!--   which.plasmo.genes.are.exp <- plasmo.obj[which(rowSums(plasmo.obj) > 0),] -->
+<!--   exp.plasmo.genes <- rownames(which.plasmo.genes.are.exp) -->
+
+<!--   # get 99th percentile of these genes -->
+<!--   pc99 = apply(which.plasmo.genes.are.exp[["RNA"]]@data,1,quantile,0.99) -->
+
+<!--   # remove these from all cells in the main lib + min expr to 0 -->
+<!--   for(i in 1:length(pc99)) -->
+<!--   { -->
+<!--     exp.plasmo.gene.index <- grep(rownames(lib_name), pattern = names(pc99)[i]) -->
+<!--     lib_name[["RNA"]]@data[exp.plasmo.gene.index,] <- lib_name[["RNA"]]@data[exp.plasmo.gene.index,] - pc99[i] -->
+<!--     if(any(lib_name[["RNA"]]@data[exp.plasmo.gene.index,] < 0)) -->
+<!--       lib_name[["RNA"]]@data[exp.plasmo.gene.index, -->
+<!--                              which(lib_name[["RNA"]]@data[exp.plasmo.gene.index,] < 0)] <- 0 -->
+<!--   } -->
+
+<!--   return(lib_name) -->
+<!-- } -->
+<!-- ``` -->
+
+```{r datadiscovery, echo = F}
+
+samplesheet <- read_excel("../Data/a_2022_Malaria_samples_scRNAseq_nucleotide_sequencing.xlsx")
+colnames(samplesheet) <- samplesheet[1,]
+samplesheet <- samplesheet[-1,]
+colnames(samplesheet)[34] <- "Library_name"
+colnames(samplesheet)[1] <- "Condition_name"
+colnames(samplesheet)[15] <- "Protocol1"
+colnames(samplesheet)[21] <- "Protocol2"
+colnames(samplesheet)[35] <- "Protocol3"
+colnames(samplesheet)[36] <- "Perform Date2"
+
+# table(samplesheet$`Multiplex Tag`, samplesheet$Library_name)
+# 
+# table(samplesheet$Condition_name, samplesheet$Library_name)
+# 
+libraries <- unique(samplesheet$Library_name)
+# 
+lib_name = "EXP1_l1"
+
+# Antibody column needs to be changed from Total_Seq to TotalSeq
+samplesheet <- samplesheet %>% 
+  mutate(Antibody = gsub("Total_Seq", "TotalSeq", `Multiplex Tag`))
+```
+
+
+```{r hto_used}
+
+# lib name
+hto_used = samplesheet %>%
+    filter(Library_name == lib_name) %>%
+    pull(Antibody) %>%
+    unique
+#hto_used <- c("Total_Seq_A_6", "Total_Seq_A_9", "Total_Seq_A_7", "Total_Seq_A_8")
+# During integration, use excel file with tag and lib info to get the correct HTO
+```
+
+```{r load_libs}
+# Load the PBMC dataset
+#data <- Read10X(data.dir = paste0("../counts/",lib_name,"/filtered_feature_bc_matrix/"))
+# for CellBender, do on cmd:
+# ptrepack --complevel 5 raw_EXP2_l3_cellbender_out.h5:/matrix raw_cellbender_EXP2_l3_out_seurat.h5:/matrix
+
+# output from Cellbender:
+ data <- Read10X_h5(filename = paste0("../counts/",lib_name,"/h5/raw_cellbender_",lib_name, "_out_seurat.h5"))
+
+gex <- data[[1]]
+hto <- data[[2]][rownames(data[[2]]) %in% hto_used, ]
+
+# remove SCoV2 genes
+# plasmo.gex <- gex[grep(rownames(gex), pattern = "^gene-PF3D7"),] # assay with Plasmodium genes
+# human.gex <- gex[grep(rownames(gex), pattern = "^gene-PF3D7", invert = T),]
+
+
+# Initialize the Seurat object with the raw (non-normalized data).
+#mono <- CreateSeuratObject(counts = gex, project = lib_name, min.cells = 3, min.features = 200)
+mono <- CreateSeuratObject(counts = gex, project = lib_name, min.cells = 3, min.features = 200)
+mono
+head(mono@meta.data, 5)
+
+```
+
+Demultiplex 1: Assign donor to cells - singlets, doublets, negatives using vireo
+
+a) match donor ID with samples (cells) 
+```{r demultiplexing_vireo}
+
+# number of donors
+n_donors <- samplesheet %>% 
+  filter(Library_name == lib_name) %>% 
+  select(Donorid) %>% 
+  unique() %>% 
+  pull
+# install / upgrade vireoSNP using pip install --upgrade --no-deps vireoSNP
+# vireo to check installation errors
+# download all cellSNP file from library -> save vcf file as .gz, leave others un-gzipped
+# error: index out of range -> solved by downloading the files again and redoing vireo
+# command line: vireo -c cellSNP_mat/ -N 5 -o vireo_result/
+
+# add vireo output to meta data
+mono.demul <- mono
+snp <- read.delim(paste("../counts/",lib_name,"/vireo_result/donor_ids.tsv", sep = ""))
+mono.demul@meta.data <- mono.demul@meta.data %>% 
+  tibble::rownames_to_column("cell") %>% 
+  left_join(snp) %>% 
+  tibble::column_to_rownames("cell")
+
+table(mono.demul$donor_id)
+
+## didn't need the next line for CellBender output:
+Idents(mono.demul) <- "donor_id"
+mono.demul <- subset(x = mono.demul, idents = c("doublet", "unassigned"), invert = T)
+
+mono <- mono.demul
+```
+
+b) Demultiplexing with hastag oligos -> identify cells with tagged barcodes (# of barcodes (Ab) = # of donors)
+```{r Demultiplexing_HTO}
+#Cell Hashing uses oligo-tagged antibodies against ubuquitously expressed surface proteins to place a “sample barcode” on each single cell, enabling different samples to be multiplexed together and run in a single experiment.
+
+# Select cell barcodes detected by both RNA and HTO In the example datasets we have already
+# filtered the cells for you, but perform this step for clarity.
+
+mono.singlet.donor <- mono
+joint.bcs <- intersect(rownames(mono.singlet.donor@meta.data), colnames(hto))
+
+# identical(colnames(pbmc@assays$RNA), rownames(pbmc@meta.data))
+# [1] TRUE
+
+# Subset RNA and HTO counts by joint cell barcodes
+#pbmc@assays$RNA <- pbmc@assays$RNA[, joint.bcs]
+mono.hto <- as.matrix(hto[,joint.bcs])
+
+## # Add HTO data as a new assay independent from RNA
+mono.singlet.donor[["HTO"]] <- CreateAssayObject(counts = mono.hto)
+
+# Normalize HTO data, here we use centered log-ratio (CLR) transformation
+mono.singlet.donor <- NormalizeData(mono.singlet.donor, assay = "HTO", normalization.method = "CLR")
+
+# If you have a very large dataset we suggest using k_function = 'clara'. This is a k-medoid
+# clustering function for large applications You can also play with additional parameters (see
+# documentation for HTODemux()) to adjust the threshold for classification Here we are using
+# the default settings
+mono.singlet.donor <- HTODemux(mono.singlet.donor, assay = "HTO") #, positive.quantile = 0.99
+#mono.singlet.donor <- MULTIseqDemux(mono.singlet.donor, assay = "HTO")
+```
+
+
+```{r plots_dem}
+
+# Global classification results
+table(mono.singlet.donor$HTO_classification.global)
+#table(mono.singlet.donor$MULTI_classification)
+
+Idents(mono.singlet.donor) <- "HTO_maxID"
+RidgePlot(mono.singlet.donor, assay = "RNA", features = rownames(mono.singlet.donor[["HTO"]]), ncol = 3)
+
+Idents(mono.singlet.donor) <- "HTO_classification.global"
+#Idents(mono.singlet.donor) <- "MULTI_classification"
+VlnPlot(mono.singlet.donor, features = c("nFeature_RNA", "nCount_RNA"), pt.size = 0.1, log = TRUE)
+#VlnPlot(mono.singlet.donor, features = c("percent.mt", "percent.plasmo"), pt.size = 0.1, log = TRUE)
+mono.h <- mono.singlet.donor
+
+# First, we will remove negative cells from the object
+# if(any(mono.h$MULTI_classification == "Negative") == T)
+#   mono.h <- subset(mono.h, idents = c("Negative"), invert = TRUE)
+
+if(any(mono.h$HTO_classification.global == "Negative") == T)
+   mono.h <- subset(mono.h, idents = c("Negative"), invert = TRUE)
+
+# Calculate a tSNE embedding of the HTO data
+DefaultAssay(mono.h) <- "HTO"
+mono.h <- ScaleData(mono.h, features = rownames(mono.h),
+    verbose = FALSE)
+mono.h <- RunPCA(mono.h, features = rownames(mono.h), approx = FALSE)
+mono.h <- RunTSNE(mono.h, check_duplicates = F)
+Idents(mono.h) <- 'HTO_classification'
+#Idents(mono.h) <- 'MULTI_classification'
+DimPlot(mono.h)
+
+# To increase the efficiency of plotting, you can subsample cells using the num.cells argument
+HTOHeatmap(mono.h, assay = "HTO", ncells = 1000)
+```
+
+
+```{r}
+#Idents(mono.singlet.donor) = "MULTI_classification"
+# Extract singlets
+hashtags <- gsub("Total_Seq", "TotalSeq", hto_used)
+hashtags <- gsub("_", "-", hashtags)
+
+mono.singlet.donor@meta.data <- mono.singlet.donor@meta.data %>%
+  mutate(Cell_state = case_when(
+    as.character(HTO_classification) %in% hashtags ~ "Singlet",
+    .default = HTO_classification
+  ))
+
+Idents(mono.singlet.donor) <- "Cell_state"
+
+mono.singlet <- subset(mono.singlet.donor, subset = Cell_state == "Singlet")
+
+# # For HTODemux:
+# mono.singlet.donor = mono.h
+# Idents(mono.singlet.donor) = "HTO_classification.global"
+# mono.singlet <- subset(mono.singlet.donor, idents = "Singlet")
+# mono.singlet
+
+# donorid <- samplesheet %>% 
+#   filter(Library_name == lib_name) %>% 
+#   dplyr::rename(HTO_classification = Antibody) %>% 
+#   mutate(HTO_classification = gsub("_", "-", HTO_classification)) %>%
+#   dplyr::rename(Group = `Patient Group`) %>% 
+#   select(Group, HTO_classification) %>% 
+#   distinct()
+
+donorid <- samplesheet %>%
+  filter(Library_name == lib_name) %>%
+  dplyr::rename(HTO_classification = Antibody) %>%
+  mutate(HTO_classification = gsub("_", "-", HTO_classification)) %>%
+  dplyr::rename(Group = `Patient Group`) %>%
+  select(Group, HTO_classification) %>%
+  distinct()
+
+mono.demul <- mono.singlet
+mono.demul@meta.data <- mono.demul@meta.data %>% 
+  left_join(., donorid)
+
+rownames(mono.demul@meta.data) <- rownames(mono.singlet@meta.data)#rownames(mono.singlet@meta.data)
+mono <- mono.demul
+# mono.demul@meta.data <- mono.demul@meta.data %>% 
+#   dplyr::rename(HTO_classification = MULTI_classification)
+
+```
+
+```{r}
+# remove_bg
+# DefaultAssay(mono) = "RNA"
+# mono.bg.removed <- remove_plasmo_bg(lib_name = mono)
+```
+
+
+```{r MT}
+#grep("^MT-",rownames(mono@assays$RNA@counts),value = TRUE)
+
+#mono.bg.removed[["percent.mt"]] <- PercentageFeatureSet(mono.bg.removed, pattern = "^MT-")
+#head(mono$percent.mt)
+mono[["percent.mt"]] <- PercentageFeatureSet(mono, pattern = "^MT-")
+```
+
+```{r ribosomal genes}
+
+# Ribosomal genes also tend to be very highly represented, and can vary between cell types, so it can be instructive to see how prevalent they are in the data. These are ribosomal protein genes rather than the actual rRNA, so they’re more a measure of the translational activity of the cell rather than the cleanliness of the polyA selection.
+
+#grep("^RP[LS]",rownames(mono@assays$RNA@counts),value = TRUE)
+#PercentageFeatureSet(mono.bg.removed,pattern="^RP[LS]") -> mono.bg.removed$percent.Ribosomal
+#head(mono$percent.Ribosomal)
+```
+
+```{r}
+# Plasmo genes
+#mono.bg.removed[["percent.plasmo"]] <- PercentageFeatureSet(mono.bg.removed, pattern="^gene-PF3D7")
+```
+
+
+```{r Visviolin}
+# Visualize QC metrics as a violin plot
+DefaultAssay(mono) <- "RNA"
+VlnPlot(mono, features=c("nCount_RNA", "nFeature_RNA"), group.by = "orig.ident", ncol = 2) 
+
+VlnPlot(mono, features=c("percent.mt"), group.by = "orig.ident", ncol = 2) 
+
+ggplot(mono@meta.data, aes(x = nFeature_RNA)) + geom_histogram(binwidth = 50)
+#ggplot(mono@meta.data, aes(x = nFeature_RNA)) + geom_histogram(binwidth = 20) + xlim(c(0, 600))
+
+ggplot(mono@meta.data, aes(x = nFeature_RNA)) + 
+  geom_histogram(binwidth = 50) +
+  facet_wrap( ~ donor_id)
+
+ggplot(mono@meta.data, aes(x = nCount_RNA)) + geom_histogram(binwidth = 50)
+ggplot(mono@meta.data, aes(x = nCount_RNA)) + 
+  geom_histogram(binwidth = 50) +
+  facet_wrap( ~ donor_id)
+#ggplot(mono@meta.data, aes(x = nCount_RNA)) + geom_histogram(binwidth = 50) + xlim(c(0, 5000))
+
+ggplot(mono@meta.data, aes(x = percent.mt)) + geom_histogram(binwidth = 1)
+ggplot(mono@meta.data, aes(x = percent.mt)) + 
+  geom_histogram(binwidth = 1) +
+  facet_wrap( ~ donor_id)
+
+#ggplot(mono.bg.removed@meta.data, aes(x = percent.plasmo)) + geom_histogram(binwidth = 0.9)
+
+
+#ggplot(mono@meta.data, aes(x = percent.Ribosomal)) + geom_histogram(binwidth = 1)
+
+#ggplot(mono@meta.data, aes(x = percent.Largest.Gene)) + geom_histogram(binwidth = 1)
+
+```
+
+
+```{r Visviolin_after_NAremoval}
+
+Idents(mono) <- "donor_id"
+cells_to_keep = mono@meta.data %>% 
+  filter(!is.na(donor_id)) %>% 
+  rownames_to_column("Cell") %>% 
+  pull(Cell)
+mono.noNA <- subset(mono, cells = cells_to_keep)
+
+# Visualize QC metrics as a violin plot
+DefaultAssay(mono.noNA) <- "RNA"
+VlnPlot(mono.noNA, features=c("nCount_RNA", "nFeature_RNA"), group.by = "orig.ident", ncol = 2) 
+
+VlnPlot(mono.noNA, features=c("percent.mt"), group.by = "orig.ident", ncol = 2) 
+
+ggplot(mono.noNA@meta.data, aes(x = nFeature_RNA)) + geom_histogram(binwidth = 50)
+
+ggplot(mono.noNA@meta.data, aes(x = nFeature_RNA)) + 
+  geom_histogram(binwidth = 50) +
+  facet_wrap( ~ donor_id)
+
+ggplot(mono.noNA@meta.data, aes(x = nCount_RNA)) + geom_histogram(binwidth = 50)
+ggplot(mono.noNA@meta.data, aes(x = nCount_RNA)) + 
+  geom_histogram(binwidth = 50) +
+  facet_wrap( ~ donor_id)
+
+ggplot(mono.noNA@meta.data, aes(x = percent.mt)) + geom_histogram(binwidth = 1)
+ggplot(mono.noNA@meta.data, aes(x = percent.mt)) + 
+  geom_histogram(binwidth = 1) +
+  facet_wrap( ~ donor_id)
+
+```
+
+```{r featurescatter}
+# plot1 <- FeatureScatter(mono.bg.removed, feature1 = "nCount_RNA", feature2 = "percent.mt")
+# plot2 <- FeatureScatter(mono.bg.removed, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + geom_smooth(method = "lm")
+# plot1 + plot2
+#FeatureScatter(mono,feature1 = "nCount_RNA", feature2 = "percent.Largest.Gene")
+```
+
+```{r}
+deadcell_nF_lowercutoff <- 2000
+deadcell_nF_uppercutoff <- 6000
+
+# final for human reads in EXP1_l1: nF = 500 - 6000
+deadcell_nC_lowercutoff <- 7000
+deadcell_mt_cutoff <- 18
+
+mono.meta <- mono.noNA@meta.data %>% 
+  mutate(is.dead = case_when(
+      nFeature_RNA >= deadcell_nF_lowercutoff & 
+        nFeature_RNA <= deadcell_nF_uppercutoff &
+        nCount_RNA >= deadcell_nC_lowercutoff &
+        percent.mt <= deadcell_mt_cutoff ~ "FALSE",
+      TRUE ~ "TRUE"))
+
+table(mono.meta$is.dead)
+
+ggplot(mono.meta, aes(x = nFeature_RNA, fill = factor(is.dead))) +
+  geom_histogram(bins = 50, position = "identity", alpha = 0.5)
+
+ggplot(mono.meta, aes(x = nCount_RNA, fill = factor(is.dead))) +
+  geom_histogram(bins = 50, position = "identity", alpha = 0.5)
+
+ggplot(mono.meta, aes(x = percent.mt, fill = factor(is.dead))) +
+  geom_histogram(bins = 50, position = "identity", alpha = 0.5)
+
+# ggplot(mono.meta, aes(x = percent.plasmo, fill = factor(is.dead))) +
+#   geom_histogram(bins = 100, position = "identity", alpha = 0.5)
+
+```
+
+
+```{r filtering}
+mono1 <- subset(mono.noNA, subset =  nFeature_RNA > deadcell_nF_lowercutoff & 
+                  nFeature_RNA < deadcell_nF_uppercutoff & 
+                  percent.mt < deadcell_mt_cutoff & 
+                  nCount_RNA > deadcell_nC_lowercutoff) #nCount_RNA >= 1000 &
+mono1
+VlnPlot(mono1, features=c("nCount_RNA", "nFeature_RNA"), group.by = "orig.ident", ncol = 2) 
+
+VlnPlot(mono1, features=c("percent.mt"), group.by = "orig.ident", ncol = 2) 
+mono = mono1
+
+```
+
+```{r save}
+#save.image("malaria_monocyte_QC.RData")
+```
