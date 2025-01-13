@@ -167,3 +167,39 @@ write.csv2(spz_go@result, "GO.enrichment_intersection_SPZ.human_SPZ.mouse.csv", 
 
 ```
 
+```{r}
+# get upset gene lists
+intersect_SPZ_human_iRBC_human <- setdiff(intersect(genelist[["SPZ_human"]], genelist[["iRBC_human"]]), union(genelist[["SPZ_mouse"]], genelist[["iRBC_mouse"]]))
+
+write.table(as.data.frame(intersect_SPZ_human_iRBC_human), "intersect_SPZ_human_iRBC_human.txt", row.names = F, quote = F)
+
+intersect_SPZ_human <- setdiff(genelist[["SPZ_human"]], union(genelist[["iRBC_human"]], union(genelist[["SPZ_mouse"]], genelist[["iRBC_mouse"]])))
+
+write.table(as.data.frame(intersect_SPZ_human), "intersect_SPZ_human.txt", row.names = F, quote = F)
+
+intersect_SPZ_mouse <- setdiff(genelist[["SPZ_mouse"]], union(genelist[["iRBC_human"]], union(genelist[["SPZ_human"]], genelist[["iRBC_mouse"]])))
+
+write.table(as.data.frame(intersect_SPZ_mouse), "intersect_SPZ_mouse.txt", row.names = F, quote = F)
+
+intersect_SPZ_mouse_iRBC_human_SPZ_human <- setdiff(intersect(genelist[["SPZ_mouse"]], intersect(genelist[["iRBC_human"]], genelist[["SPZ_human"]])),  genelist[["iRBC_mouse"]])
+
+write.table(as.data.frame(intersect_SPZ_mouse_iRBC_human_SPZ_human), "intersect_SPZ_mouse_iRBC_human_SPZ_human.txt", row.names = F, quote = F)
+
+intersect_iRBC_human <- setdiff(genelist[["iRBC_human"]], union(genelist[["SPZ_human"]], union(genelist[["SPZ_mouse"]], genelist[["iRBC_mouse"]])))
+
+write.table(as.data.frame(intersect_iRBC_human), "intersect_iRBC_human.txt", row.names = F, quote = F)
+
+intersect_SPZ_human_SPZ_mouse <- setdiff(intersect(genelist[["SPZ_human"]], genelist[["SPZ_mouse"]]), union(genelist[["iRBC_human"]], genelist[["iRBC_mouse"]]))
+
+write.table(as.data.frame(intersect_SPZ_human_SPZ_mouse), "intersect_SPZ_human_SPZ_mouse.txt", row.names = F, quote = F)
+
+intersect_iRBC_human_SPZ_mouse <- setdiff(intersect(genelist[["iRBC_human"]], genelist[["SPZ_mouse"]]), union(genelist[["SPZ_human"]], genelist[["iRBC_mouse"]]))
+
+write.table(as.data.frame(intersect_iRBC_human_SPZ_mouse), "intersect_iRBC_human_SPZ_mouse.txt", row.names = F, quote = F)
+
+intersect_iRBC_mouse <- setdiff(genelist[["iRBC_mouse"]], union(genelist[["SPZ_human"]], union(genelist[["SPZ_mouse"]], genelist[["iRBC_human"]])))
+
+write.table(as.data.frame(intersect_iRBC_mouse), "intersect_iRBC_mouse.txt", row.names = F, quote = F)
+
+```
+
