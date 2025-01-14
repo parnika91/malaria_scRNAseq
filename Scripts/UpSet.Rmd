@@ -33,6 +33,11 @@ RBC_vs_iRBC_human <- read.csv("tables/iRBC_vs_RBC_human_nothr.csv") %>%
   filter(log2FoldChange > 1 & padj < 0.1)
 RBC_vs_iRBC_mouse <- read.csv("../Data/iRBC_RBC_4h.csv") %>% 
   filter(log2FoldChange > 0 & padj < 0.1)
+
+SPZ_vs_iRBC_human <- read.csv("tables/SPZ_vs_iRBC_human_nothr.csv") %>%
+  filter(log2FoldChange > 1 & padj < 0.1)
+SPZ_vs_iRBC_mouse <- read.csv("../Data/SPZ-iRBC_df_4h.csv") %>%
+  filter(log2FoldChange > 1 & padj < 0.1)
 ```
 
 ```{r}
@@ -53,20 +58,23 @@ genelist <- list(
   SPZ_human = untr_vs_SPZ_human$gene,
   SPZ_mouse = convertMouseGeneList(untr_vs_SPZ_mouse$GeneSymbol),
   iRBC_human = RBC_vs_iRBC_human$gene,
-  iRBC_mouse = convertMouseGeneList(RBC_vs_iRBC_mouse$GeneSymbol)
+  iRBC_mouse = convertMouseGeneList(RBC_vs_iRBC_mouse$GeneSymbol),
+  #SPZ_iRBC_human = SPZ_vs_iRBC_human$gene,
+  #SPZ_iRBC_mouse = convertMouseGeneList(SPZ_vs_iRBC_mouse$GeneSymbol)
 )
 
-pdf("upset_plot_common_genes_human_mouse.pdf",  width = 7, height = 5)
+
+pdf("upset_plot_common_genes_human_mouse.pdf",  width = 9, height = 5)
 upset(fromList(genelist),
       order.by = "freq",
       point.size = 3.5,
       mb.ratio = c(0.55, 0.45),
-      text.scale = c(1.5, 1.5, 1.5, 1.25, 1.5, 1.5),
-      shade.color = "darkgreen",
-      shade.alpha = 0.4,
-      matrix.color = "darkslategray",
-      main.bar.color = "darkseagreen4",
-      sets.bar.color = "lightskyblue4"
+      text.scale = c(1.5, 1.5, 1.5, 1.15, 1.5, 1.5),
+      #shade.color = "darkgreen", #darkgreen
+      shade.alpha = 0.4
+      #matrix.color = "darkslategray", #darkslategray
+      #main.bar.color = "darkseagreen4", #darkseagreen4
+      #sets.bar.color = "lightskyblue4" #lightskyblue4
       )
 dev.off()
 ```

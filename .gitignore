@@ -1,4 +1,7 @@
 # Ignore all subfolders
 Scripts/*/
 Scripts/.Rhistory
+.Rhistory
+.RData
+Scripts/.RData
 
