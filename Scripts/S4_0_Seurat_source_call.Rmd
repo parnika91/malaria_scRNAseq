@@ -1,0 +1,45 @@
+---
+title: "Single cell RNA-seq of Plasmodium sporozoite-infected monocytes"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+  toc: TRUE
+---
+
+```{r opts, echo = F}
+knitr::opts_chunk$set(warning = F, message = F)
+# knitr::opts_chunk$set(fig.pos = "!H", out.extra = "")
+#knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80),tidy=TRUE)
+
+```
+
+```{r load_libraries, echo = F, message = F, warning = F}
+library(Seurat)
+library(patchwork)
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+library(broom)
+library(stringr)
+library(ggplot2)
+library(cowplot)
+library(RColorBrewer)
+library(presto)
+```
+
+```{r}
+# library for QC
+lib_name = "EXP1_l1"
+```
+
+```{r demul_QC, child = 'S4_1_Demultiplex_QC.Rmd', echo = T, result = 'asis'}
+
+```
+
+```{r morn_cluster, child = 'S4_2_Normalisation_Clustering.Rmd', echo = T, result = 'asis'}
+
+```

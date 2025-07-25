@@ -1,0 +1,599 @@
+---
+title: "Single cell RNA-seq of Plasmodium sporozoite-infected monocytes - integration of libraries and data exploration"
+output:
+  html_document:
+    keep_md: true
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+  pdf_document:
+    keep_md: true
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: kable
+always_allow_html: true
+---
+
+```{r setup, include=T} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(fig.width = 10, fig.height = 8) 
+```
+
+```{r}
+library(Seurat)
+library(patchwork)
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+library(broom)
+library(stringr)
+library(ggplot2)
+library(cowplot)
+library(RColorBrewer)
+library(viridis)
+library(presto)
+```
+
+```{r}
+file_1_l1 = list.files("robjects/",pattern = "^EXP1_l1.*\\_cellbender.rds$")
+file_1_l2 = list.files("robjects/",pattern = "^EXP1_l2.*\\_cellbender.rds$")
+file_2_l1 = list.files("robjects/",pattern = "^EXP2_l1.*\\_cellbender.rds$")
+file_2_l2 = list.files("robjects/",pattern = "^EXP2_l2_reseq.*\\_cellbender.rds$")
+file_2_l3 = list.files("robjects/",pattern = "^EXP2_l3.*\\_cellbender.rds$")
+
+EXP1_l1 <- readRDS(paste0("robjects/",file_1_l1))
+EXP1_l2 <- readRDS(paste0("robjects/",file_1_l2))
+EXP2_l1 <- readRDS(paste0("robjects/",file_2_l1))
+EXP2_l2 <- readRDS(paste0("robjects/",file_2_l2))
+EXP2_l3 <- readRDS(paste0("robjects/",file_2_l3))
+```
+
+```{r}
+set.seed(123)
+
+### Seurat v5:
+exp <- merge(EXP1_l1, 
+             y = c(EXP1_l2, EXP2_l1, EXP2_l2, EXP2_l3), 
+             add.cell.ids = c("1_l1", "1_l2", "2_l1", "2_l2", "2_l3"), 
+             project = "Malaria2022")
+
+# run standard anlaysis workflow
+exp <- NormalizeData(exp)
+exp <- FindVariableFeatures(exp)
+exp <- ScaleData(exp)
+exp <- RunPCA(exp)
+exp <- FindNeighbors(exp, 
+                     dims = 1:30, 
+                     reduction = "pca")
+exp <- FindClusters(exp, 
+                    resolution = 1, 
+                    cluster.name = "unintegrated_clusters")
+exp <- RunUMAP(exp, 
+               dims = 1:30, 
+               reduction = "pca", 
+               reduction.name = "umap.unintegrated")
+
+```
+
+```{r}
+
+# Integrate data
+integrated <- IntegrateLayers(object = exp, 
+                              method = CCAIntegration, 
+                              orig.reduction = "pca", 
+                              new.reduction = "integrated.cca",
+    verbose = T)
+
+integrated <- FindNeighbors(integrated, 
+                            reduction = "integrated.cca", 
+                            dims = 1:30)
+
+integrated <- FindClusters(integrated, 
+                           resolution = 1)
+
+integrated <- RunUMAP(integrated, 
+                      dims = 1:30, 
+                      reduction = "integrated.cca", 
+                      reduction.name = "umap_cca")
+
+integrated <- JoinLayers(integrated) 
+
+```
+
+```{r}
+before <- data.frame(exp@reductions[["umap.unintegrated"]]@cell.embeddings, 
+                     orig.ident = exp$orig.ident)
+
+p1 <- ggplot(before, 
+             aes(x = umapunintegrated_1, y = umapunintegrated_2, 
+                 colour = orig.ident)) +
+  geom_point(size = 0.2, alpha = 0.7) +
+  theme_bw() +
+  scale_colour_manual(values = c("chocolate", 
+                                 "blue4",
+                                 "brown3",
+                                 "darkolivegreen3",
+                                 "darkslategray3")) +
+  ggtitle("Before Integration")
+
+after <- data.frame(integrated@reductions[["umap_cca"]]@cell.embeddings, 
+                    orig.ident = exp$orig.ident)
+
+p2 <- ggplot(after, aes(x = umapcca_1, y = umapcca_2, 
+                        colour = orig.ident)) +
+  geom_point(size = 0.2, alpha = 0.7) +
+  theme_bw() +
+  scale_colour_manual(values = c("chocolate", 
+                                 "blue4",
+                                 "brown3",
+                                 "darkolivegreen3",
+                                 "darkslategray3")) +
+  ggtitle("After Integration")
+
+p1 + p2
+
+```
+
+```{r}
+# from vireo donor matching run (S2_Vireo_donor_matching.py)
+integrated@meta.data <- integrated@meta.data %>% 
+  mutate(Donorid = case_when(
+    orig.ident %in% c("EXP1_l1") & donor_id == "donor0" ~ "D1",
+    orig.ident %in% c("EXP1_l2") & donor_id == "donor1" ~ "D1",
+    
+    orig.ident %in% c("EXP1_l1") & donor_id == "donor1" ~ "D2",
+    orig.ident %in% c("EXP1_l2") & donor_id == "donor0" ~ "D2",
+    
+    orig.ident %in% c("EXP2_l1") & donor_id == "donor0" ~ "D3",
+    orig.ident %in% c("EXP2_l2") & donor_id == "donor1" ~ "D3",
+    orig.ident %in% c("EXP2_l3") & donor_id == "donor2" ~ "D3",
+    
+    orig.ident %in% c("EXP2_l1") & donor_id == "donor1" ~ "D4",
+    orig.ident %in% c("EXP2_l2") & donor_id == "donor2" ~ "D4",
+    orig.ident %in% c("EXP2_l3") & donor_id == "donor1" ~ "D4",
+    
+    orig.ident %in% c("EXP2_l1") & donor_id == "donor2" ~ "D5",
+    orig.ident %in% c("EXP2_l2") & donor_id == "donor0" ~ "D5",
+    orig.ident %in% c("EXP2_l3") & donor_id == "donor0" ~ "D5",
+
+    .default = ""
+  ))
+
+```
+
+```{r}
+DefaultAssay(integrated) <- "RNA"
+DimPlot(integrated, 
+        group.by = "Donorid",
+        reduction = "umap_cca", 
+        label = "F")
+```
+
+```{r}
+DimPlot(integrated, 
+        group.by = "seurat_clusters", 
+        reduction = "umap_cca", 
+        label = "T")
+```
+
+```{r}
+DimHeatmap(integrated, 
+           reduction = "pca", 
+           dims = 1:5, 
+           cells = 500, 
+           balanced = TRUE)
+```
+
+```{r}
+# effect of sex
+FeaturePlot(integrated, 
+            features = c("XIST"),
+            reduction = "umap_cca")
+```
+
+```{r}
+FeaturePlot(integrated, 
+            features = c("CD14", "FCGR3A"),
+            reduction = "umap_cca")
+```
+
+```{r}
+DimPlot(integrated, 
+        group.by = "Group",
+        reduction = "umap_cca", 
+        label = "T")
+table(integrated$Group)
+```
+ 
+```{r}
+# markers to manually annotate cells types
+markers <- FindAllMarkers(integrated, 
+                          only.pos = TRUE)
+markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10
+```
+
+# Remove T, B, DC cells
+```{r}
+# after manual annotation
+# remove T, B and DC cells
+
+integrated <- RenameIdents(integrated,
+                                `0` = "Intermediate monocytes",
+                                `1` = "Activated monocytes (NFkb)",
+                                `2` = "Classical monocytes",
+                                `3` = "Activated monocytes (IFN-I)",
+                                `4` = "Activated monocytes (NFkb + IFN-I)",
+                                `5` = "Classical monocytes",
+                                `6` = "Classical monocytes",
+                                `7` = "Classical monocytes",
+                                `8` = "Activated monocytes (NFkb + IFN-I)",
+                                `9` = "Classical monocytes",
+                                `10` = "Activated monocytes (NFkb + IFN-I)",
+                                `11` = "Non-classical monocytes",
+                                `12` = "T",
+                                `13` = "Activated DCs",
+                           `14` = "Intermediate/Non-classical monocytes",
+                           `15` = "Non-classical Mono",
+                           `16` = "DCs",
+                           `17` = "T",
+                           `18` = "B",
+                           `19` = "T")
+
+integrated$predicted.celltype <- Idents(integrated)
+
+DimPlot(integrated, 
+        reduction = "umap_cca", 
+        group.by = "predicted.celltype",
+        label = T)
+```
+
+# Re-integrate after removing T, B cells and DCs {.tabset}
+```{r}
+integrated.TB_DCremoved <- subset(integrated, 
+                               subset = predicted.celltype %in% c("B", "T", "DCs", "Activated DCs"), 
+                               invert = T)
+
+integrated.TB_DCremoved[["RNA"]] <- split(integrated.TB_DCremoved[["RNA"]], 
+                                       f = integrated.TB_DCremoved$orig.ident)
+
+integrated.TB_DCremoved <- NormalizeData(integrated.TB_DCremoved)
+integrated.TB_DCremoved <- FindVariableFeatures(integrated.TB_DCremoved)
+integrated.TB_DCremoved <- ScaleData(integrated.TB_DCremoved)
+integrated.TB_DCremoved <- RunPCA(integrated.TB_DCremoved)
+integrated.TB_DCremoved <- IntegrateLayers(object = integrated.TB_DCremoved, 
+                                           method = CCAIntegration, 
+                                           orig.reduction = "pca", 
+                                           new.reduction = "integrated.cca",
+    verbose = FALSE)
+
+integrated.TB_DCremoved <- FindNeighbors(integrated.TB_DCremoved, 
+                                         reduction = "integrated.cca", 
+                                         dims = 1:30)
+integrated.TB_DCremoved <- FindClusters(integrated.TB_DCremoved, 
+                                        resolution = 1)
+integrated.TB_DCremoved <- RunUMAP(integrated.TB_DCremoved, 
+                                   dims = 1:30, 
+                                   reduction.name = "noTBDC_umap_cca")
+
+DimPlot(integrated.TB_DCremoved, 
+        reduction = "noTBDC_umap_cca", 
+        group.by = "orig.ident")
+
+# re-join layers after integration
+integrated.TB_DCremoved[["RNA"]] <- JoinLayers(integrated.TB_DCremoved[["RNA"]])
+
+```
+
+```{r}
+DimPlot(integrated.TB_DCremoved, 
+        group.by = "predicted.celltype",
+        reduction = "noTBDC_umap_cca", 
+        label = "T")
+```
+
+## Features in clusters
+```{r}
+myPalette <- colorRampPalette(rev(brewer.pal(11, "Spectral")))
+lib_name = "integrated"
+
+meta <- integrated.TB_DCremoved@meta.data %>% 
+  rownames_to_column("Cell") %>% 
+  select("Cell", "nFeature_RNA", "percent.mt", "nCount_RNA") #, "percent.plasmo"
+
+umap_embed <- integrated.TB_DCremoved@reductions[["noTBDC_umap_cca"]]@cell.embeddings %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Cell") %>%
+  left_join(., meta) %>% 
+  mutate(lib = lib_name)
+
+# mt.percent on umap
+sc <- scale_colour_gradientn(colours = myPalette(100), 
+                             limits=c(0, 
+                                      max(umap_embed$percent.mt)))
+
+ggplot(umap_embed, aes(umapcca_1, umapcca_2, 
+                       colour = percent.mt)) +
+  geom_point(size = 0.3, alpha = 0.8) +
+  facet_wrap( ~ lib, 
+              ncol = 2, 
+              scales = "free") +
+  sc +
+  theme_bw()
+
+# nF on umap
+sc <- scale_colour_gradientn(colours = myPalette(100), 
+                             limits=c(min(umap_embed$nFeature_RNA), 
+                                      max(umap_embed$nFeature_RNA)))
+ggplot(umap_embed, aes(umapcca_1, umapcca_2, 
+                       colour = nFeature_RNA)) +
+  geom_point(size = 0.3, alpha = 0.8) +
+  facet_wrap( ~ lib, 
+              ncol = 2, 
+              scales = "free") +
+  sc +
+  theme_bw()
+
+# nCount on umap
+sc <- scale_colour_gradientn(colours = myPalette(100), 
+                             limits=c(min(umap_embed$nCount_RNA), 
+                                      max(umap_embed$nCount_RNA)))
+ggplot(umap_embed, aes(umapcca_1, umapcca_2, 
+                       colour = nCount_RNA)) +
+  geom_point(size = 0.3, alpha = 0.8) +
+  facet_wrap( ~ lib, 
+              ncol = 2, 
+              scales = "free") +
+  sc +
+  theme_bw()
+
+```
+
+```{r}
+integrated.TB_DCremoved <- RenameIdents(integrated.TB_DCremoved,
+                                `0` = "Classical Monocytes",
+                                `1` = "Intermediate Monocytes",
+                                `2` = "Activated Monocytes (NFkB)",
+                                `3` = "Activated Monocytes (NFkB + IFN)",
+                                `4` = "Activated Non-classical Monocytes (IFN)",
+                                `5` = "Classical Monocytes",
+                                `6` = "Classical Monocytes",
+                                `7` = "Activated Monocytes (NFkB + IFN)",
+                                `8` = "Non-classical Monocytes",
+                                `9` = "Non-classical Monocytes",
+                                `10` = "Intermediate Monocytes"
+                           )
+
+integrated.TB_DCremoved$celltype <- Idents(integrated.TB_DCremoved)
+
+
+DimPlot(integrated.TB_DCremoved, 
+        reduction = "noTBDC_umap_cca", 
+        group.by = c("celltype"), 
+        label = F)
+
+ggsave("reanalysis.reintegrated.TB_DCremoved.onlyhuman.cellbender.dimplot.Celltypes_dims1_30_res1.png", 
+       units = "cm", 
+       dpi = 300, 
+       width = 25, 
+       height = 12)
+
+saveRDS(integrated.TB_DCremoved, 
+        "robjects/reanalysis_TB_DCremoved_reintegrated_onlyhuman_cellbender.rds")
+```
+
+```{r}
+svg("reanalysis_UMAP_celltypes.svg", width = 12, height = 7)
+DimPlot(integrated.TB_DCremoved, 
+        group.by = "celltype", 
+        reduction = "noTBDC_umap_cca", 
+        label = F) 
+dev.off()
+```
+
+```{r}
+markers <- FindAllMarkers(integrated.TBremoved, 
+                          only.pos = TRUE)
+markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10
+
+pdf("reanalysis_heatmap_marker_genes_celltypes.pdf", width = 12, height = 7)
+DoHeatmap(integrated.TBremoved, 
+          features = top10$gene, 
+          label = F)
+dev.off()
+```
+
+# Condition
+```{r}
+
+Idents(integrated.TB_DCremoved) <- "Group"
+spz_inf <- WhichCells(integrated.TB_DCremoved, 
+                      idents = "sporozoite_infected")
+spz_bys <- WhichCells(integrated.TB_DCremoved, 
+                      idents = "sporozoite_bystander")
+control <- WhichCells(integrated.TB_DCremoved, 
+                      idents = "control")
+
+svg("reanalysis_Sporozoite_conditions_alpha0.8.svg", height = 7, width = 10)
+DimPlot(integrated.TB_DCremoved, 
+        label = F, 
+        pt.size = 0.01, 
+        alpha = 0.8,
+        group.by = "Group", 
+        reduction = "noTBDC_umap_cca",
+        cells.highlight = list(spz_inf, spz_bys, control), 
+        sizes.highlight = 0.01,
+        cols.highlight = c("#7094CD", "#4A3728", "#00CD6C"), cols = "gray80") +
+  ggtitle("Blue=control, Black=SPZ_bystander, Green=SPZ_GFPpos")
+dev.off()
+
+rbc_inf <- WhichCells(integrated.TB_DCremoved, 
+                      idents = "RBC_infected")
+rbc_bys <- WhichCells(integrated.TB_DCremoved, 
+                      idents = "RBC_bystander")
+rbc_control <- WhichCells(integrated.TB_DCremoved, 
+                          idents = "RBC_control")
+
+svg("reanalysis_RBC_conditions_alpha0.8.svg", height = 7, width = 10)
+DimPlot(integrated.TB_DCremoved, 
+        label = F, 
+        pt.size = 0.01, 
+        alpha = 0.8,
+        group.by = "Group", 
+        reduction = "noTBDC_umap_cca",
+        cells.highlight = list(rbc_inf, rbc_bys, rbc_control), 
+        sizes.highlight = 0.01,
+        cols.highlight = c("#7094CD", "#4A3728", "#00CD6C"), cols = "gray80") +
+  ggtitle("Blue=RBC_control, Brown=RBC_bystander, Green=RBC_GFPpos")
+dev.off()
+
+integrated.TB_DCremoved@meta.data <- integrated.TB_DCremoved@meta.data %>% 
+  mutate(controls = case_when(
+    Group == "control" ~ "Control",
+    Group == "RBC_control" ~ "Control",
+    .default = ""
+  ))
+
+```
+
+```{r}
+# percentage of cells per donor per condition
+cell_counts <- table(integrated.TB_DCremoved@meta.data$Donorid, 
+                     integrated.TB_DCremoved@meta.data$Group, 
+                     integrated.TB_DCremoved@meta.data$celltype)
+
+# Convert to a data frame for easier viewing
+cell_counts_df <- as.data.frame(cell_counts)
+colnames(cell_counts_df) <- c("Donor", "Group", "CellType", "CellCount")
+
+# Calculate total number of cells per Donor
+cell_counts_df <- cell_counts_df %>%
+  group_by(Group) %>%
+  mutate(TotalCells = sum(CellCount)) %>%  # Total cells per Donor
+  #mutate(Percent = (CellCount / TotalCells) * 100) %>%  # Calculate percentage
+  ungroup()
+
+ggplot(cell_counts_df, 
+       aes(x = factor(Group, 
+                      levels = c("control", "RBC_control",
+                                 "sporozoite_bystander", 
+                                 "sporozoite_infected",
+                                 "RBC_bystander", 
+                                 "RBC_infected")),
+           
+                           y = CellCount, fill = CellType)) +
+  geom_bar(position = "fill", 
+           stat = "identity") +
+  theme_bw() +
+  scale_fill_viridis_d() +
+  theme(axis.text.x = element_text(angle = 45, 
+                                   hjust = 1)) +
+  xlab("Conditions") +
+  ylab("Cell type % in condition")
+
+ggsave("reanalysis_celltype_percent_per_condition.png", dpi = 300, units = "cm", width = 20, height = 10)
+
+# Create a new column combining Group and Donor
+cell_counts_df <- cell_counts_df %>%
+  mutate(Group_Donor = paste(Group, Donor, sep = "_"))
+
+# check if desired variable sums up to 100%
+# percent <- cell_counts_df %>% 
+#   group_by(Donor) %>% 
+#   summarise(n = sum(Percent))
+
+# Pivot the table to make Group_Donor columns
+cell_counts_wide <- cell_counts_df %>%
+  select(CellType, 
+         Group_Donor, 
+         CellCount) %>%
+  pivot_wider(names_from = Group_Donor, 
+              values_from = CellCount, 
+              values_fill = 0)
+
+write.csv2(cell_counts_wide, "reanalysis_cellnumber.csv", quote = F, row.names = F)
+```
+
+```{r}
+gene_sign <- read.table("../data/Plasma_membrane_injury_signature_humangenes.csv", 
+                        sep = ",", 
+                        header = T)
+
+gene_sign_list <- list(
+  MLKL_NIH3T3 = gene_sign$MLKL_NIH3T3,
+  MLKL_LLC = gene_sign$MLKL_LLC,
+  GSDM_NIH3T3 = gene_sign$GSMD_NIH3T3,
+  GSDM_LLC = gene_sign$GSMD_LLC,
+  Digitonin_NIH3T3 = gene_sign$Digitonin_NIH3T3,
+  Digitonin_LLC = gene_sign$Digitonin_LLC
+)
+
+gene_sign_combined <- unique(unlist(gene_sign_list))
+
+integrated.TB_DCremoved@meta.data <- integrated.TB_DCremoved@meta.data %>% 
+  mutate(ctrl_bys_inf = case_when(
+    Group %in% c("sporozoite_bystander", 
+                 "sporozoite_infected") ~ "SPZ_bys_inf",
+    Group %in% c("RBC_bystander", 
+                 "RBC_infected") ~ "RBC_bys_inf",
+    .default = Group
+  ))
+
+p <- AddModuleScore(
+  integrated.TB_DCremoved,
+  features = list(gene_sign_combined),
+  pool = NULL,
+  nbin = 5,
+  ctrl = 20,
+  k = FALSE,
+  assay = "RNA",
+  name = "gene_set",
+  seed = 1,
+  search = T,
+  slot = "data"
+)
+
+gene_set_col = data.frame(
+  Cell_ID = colnames(p), 
+  p@reductions[["noTBDC_umap_cca"]]@cell.embeddings, 
+  ModScore = p@meta.data$gene_set1, 
+  Group = p$ctrl_bys_inf, 
+  Donor = p$Donorid)
+
+write.csv2(gene_set_col, 
+           "tables/Plasma_membrane_injury_all6genelists_ModuleScores_perCell.csv", 
+           row.names = F, 
+           quote = F)
+
+pdf("plasma_membrane_injury_combined_signature.pdf", width = 6, height = 7)
+ggplot(gene_set_col, 
+       aes(x = noTBDCumapcca_1, 
+           y = noTBDCumapcca_2, 
+           color = ModScore)) +
+  geom_point(size = 0.2, alpha = 0.7) +
+  scale_colour_gradientn(
+    colours = rev(brewer.pal(
+      n = 11, name = "RdBu"))) +
+  facet_wrap( . ~ factor(
+    Group, c("control", "RBC_control",
+             "SPZ_bys_inf", "RBC_bys_inf")),
+              ncol = 2) +
+  ggtitle("Combined signature") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+dev.off()
+```
+

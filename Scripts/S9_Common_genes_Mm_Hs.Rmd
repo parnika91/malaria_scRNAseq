@@ -1,0 +1,131 @@
+---
+title: "Common upregulated genes in human and mouse"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+  toc: TRUE
+---
+
+```{r}
+library(UpSetR)
+library(tidyverse)
+library(biomaRt)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(fgsea)
+library(msigdb)
+```
+
+```{r}
+# load mouse and human DEG lists
+
+untr_vs_SPZ_human <- 
+  read.table("tables/reanalysis_pseudobulk_SPZ.de.txt", header = T) %>% 
+  filter(avg_log2FC > 1 & p_val_adj < 0.1)
+
+untr_vs_SPZ_mouse <- read.csv("../Data/SPZ-GFPpos_untr_df_4h.csv") %>%
+  filter(log2FoldChange > 1 & padj < 0.1)
+###
+
+RBC_vs_iRBC_human <- 
+  read.table("tables/reanalysis_pseudobulk_RBC.de.txt", header = T) %>% 
+  filter(avg_log2FC > 1 & p_val_adj < 0.1)
+
+RBC_vs_iRBC_mouse <- read.csv("../Data/iRBC_RBC_4h.csv") %>% 
+  filter(log2FoldChange > 0 & padj < 0.1)
+
+```
+
+```{r}
+Mm_to_Hs <- function(x)
+{
+  Mm = useMart(
+    "ensembl", 
+    host = "https://dec2021.archive.ensembl.org",
+    dataset = "mmusculus_gene_ensembl")
+  
+  Hs = useMart(
+    "ensembl", 
+    host = "https://dec2021.archive.ensembl.org",
+    dataset = "hsapiens_gene_ensembl")
+  
+  conv = getLDS(attributes = c("mgi_symbol"), 
+                filters = "mgi_symbol", 
+                values = x , 
+                mart = Mm, 
+                attributesL = c("hgnc_symbol"), 
+                martL = Hs, 
+                uniqueRows=T)
+  
+  Hs_new <- unique(conv[, 2])
+  return(Hs_new)
+}
+```
+
+
+```{r}
+# Upset
+
+genelist <- list(
+  SPZ_human = untr_vs_SPZ_human$gene,
+  SPZ_mouse = Mm_to_Hs(untr_vs_SPZ_mouse$GeneSymbol),
+  iRBC_human = RBC_vs_iRBC_human$gene,
+  iRBC_mouse = Mm_to_Hs(RBC_vs_iRBC_mouse$GeneSymbol)
+)
+
+
+png("reanalysis_upset_plot_common_genes_human_mouse.png", 
+    res = 300, 
+    width = 15,
+    height = 12, 
+    units = "cm") 
+
+upset(fromList(genelist),
+      order.by = "freq",
+      point.size = 3.5,
+      mb.ratio = c(0.55, 0.45),
+      text.scale = c(1.5, 1.5, 1.5, 1.15, 1.5, 1.5),
+      shade.alpha = 0.4
+      )
+
+dev.off()
+```
+
+```{r}
+# check if the overlap between human and mouse was significant
+
+overlap = length(intersect(genelist$SPZ_human, 
+                           genelist$SPZ_mouse))
+humanDEGs = length(genelist$SPZ_human)
+mouseDEGs = length(genelist$SPZ_mouse)
+universe = length(unique(genelist$SPZ_human, 
+                           genelist$SPZ_mouse))
+
+contingency.matrix <- matrix(
+  c(overlap, 
+    humanDEGs - overlap, 
+    mouseDEGs - overlap, 
+    universe - humanDEGs - mouseDEGs + overlap), 
+  nrow = 2)
+
+rownames(contingency.matrix) <- c("Human DE - YES", "Human DE - NO")
+colnames(contingency.matrix) <- c("Mouse DE - YES", "Mouse DE- NO")
+
+fisher.test(contingency.matrix)
+
+# Fisher's Exact Test for Count Data
+# 
+# data:  matrix(c(overlap, humanDEGs - overlap, mouseDEGs - overlap, universe - humanDEGs - mouseDEGs + overlap), nrow = 2)
+# p-value < 2.2e-16
+# alternative hypothesis: true odds ratio is not equal to 1
+# 95 percent confidence interval:
+#  2.891827 4.879825
+# sample estimates:
+# odds ratio 
+#   3.766259 
+# OR > 1 → Genes are more likely to appear in both lists than expected by chance
+# → Suggests enrichment (i.e. biological overlap)
+```
+

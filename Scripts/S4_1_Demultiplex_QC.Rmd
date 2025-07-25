@@ -1,0 +1,313 @@
+---
+title: "Single cell RNA-seq of Plasmodium sporozoite-infected monocytes - demultiplexing and quality control"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  toc: TRUE
+---
+
+```{r, echo = F}
+knitr::opts_chunk$set(warning = F, message = F)
+```
+
+```{r datadiscovery, echo = F}
+
+samplesheet <- read.csv2("../data/single_cell_10x_Malaria2022_cleaned_samplesheet.csv")
+
+table(samplesheet$`Multiplex Tag`, 
+      samplesheet$Library_name)
+
+libraries <- unique(samplesheet$Library_name)
+
+# Antibody column needs to be changed from Total_Seq to TotalSeq
+samplesheet <- samplesheet %>% 
+  mutate(Antibody = gsub("Total_Seq", "TotalSeq", `Multiplex Tag`)) %>% 
+  filter(Library_name == lib_name)
+
+```
+
+```{r hto_used}
+
+hto_used = samplesheet %>%
+    filter(Library_name == lib_name) %>%
+    pull(Antibody) %>%
+    unique
+
+```
+
+```{r load_libs}
+# Load the PBMC dataset
+h5_obj <- paste0("../counts/",lib_name,"/h5/raw_cellbender_",lib_name, "_out_seurat.h5")
+
+# output from Cellbender:
+data <- Read10X_h5(filename = h5_obj)
+
+gex <- data[[1]]
+hto <- data[[2]][rownames(data[[2]]) %in% hto_used, ]
+
+# remove plasmo genes
+human.gex <- gex[grep(rownames(gex), 
+                      pattern = "^gene-PF3D7", 
+                      invert = T),]
+
+# Initialize the Seurat object with the raw (non-normalized data).
+mono <- CreateSeuratObject(counts = human.gex, 
+                           project = lib_name, 
+                           min.cells = 3, 
+                           min.features = 50)
+
+```
+
+Demultiplex 1: Assign donor to cells - singlets, doublets, negatives using vireo
+
+a) match donor ID with samples (cells) from SNPs
+
+```{r demultiplexing_vireo}
+vireo_out <- paste("../data/",lib_name,"/vireo_result/donor_ids.tsv")
+
+# add vireo output to meta data
+snp <- read.delim(vireo_out, 
+                   sep = "")
+
+mono@meta.data <- mono@meta.data %>% 
+  tibble::rownames_to_column("cell") %>% 
+  left_join(snp) %>% 
+  tibble::column_to_rownames("cell")
+
+table(mono$donor_id)
+
+# keep only singlets based on vireo output
+Idents(mono) <- "donor_id"
+mono <- subset(x = mono, 
+               idents = c("doublet", "unassigned"), 
+               invert = T)
+```
+
+b) Demultiplexing hastag oligos
+
+```{r Demultiplexing_HTO}
+# Select cell barcodes detected by both RNA and HTO In the example data sets we have already
+# filtered the cells for you, but perform this step for clarity.
+
+mono.singlet.donor <- mono
+
+joint.bcs <- intersect(rownames(mono.singlet.donor@meta.data), 
+                       colnames(hto))
+
+identical(colnames(mono.singlet.donor@assays$RNA), 
+          rownames(mono.singlet.donor@meta.data))
+# [1] TRUE
+
+# Subset RNA and HTO counts by joint cell barcodes
+mono.hto <- as.matrix(hto[,joint.bcs])
+
+# Add HTO data as a new assay independent from RNA
+mono.singlet.donor[["HTO"]] <- CreateAssayObject(counts = mono.hto)
+
+# Normalize HTO data, here we use centered log-ratio (CLR) transformation
+mono.singlet.donor <- NormalizeData(mono.singlet.donor, 
+                                    assay = "HTO", 
+                                    normalization.method = "CLR")
+```
+
+```{r}
+
+HTO_analysis <- function(mono.singlet.donor, qt)
+{
+  mono.singlet.donor <- HTODemux(mono.singlet.donor, 
+                                 assay = "HTO", 
+                                 positive.quantile = qt)
+  
+  print(RidgePlot(mono.singlet.donor, 
+                  assay = "HTO", 
+                  features = rownames(mono.singlet.donor[["HTO"]]), 
+                  ncol = 2))
+  
+  print(table(mono.singlet.donor$HTO_classification.global))
+  
+  return(mono.singlet.donor)
+}
+
+```
+
+```{r}
+mono.singlet.donor0.99 <- HTO_analysis(mono.singlet.donor, 
+                                       qt = 0.99)
+```
+
+<!-- ```{r} -->
+<!-- # try other percentiles if they work better -->
+<!-- mono.singlet.donor0.95 <- HTO_analysis(mono.singlet.donor, qt = 0.95) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- mono.singlet.donor0.9 <- HTO_analysis(mono.singlet.donor, qt = 0.9) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- mono.singlet.donor0.85 <- HTO_analysis(mono.singlet.donor, qt = 0.85) -->
+<!-- ``` -->
+
+```{r}
+mono.singlet.donor <- mono.singlet.donor0.99
+```
+
+```{r}
+
+mono.singlet <- subset(mono.singlet.donor, 
+                       subset = HTO_classification.global == "Singlet")
+
+donorid <- samplesheet %>%
+  filter(
+    Library_name == lib_name
+    ) %>%
+  dplyr::rename(
+    HTO_classification = Antibody
+    ) %>%
+  mutate(
+    HTO_classification = gsub("_", "-", HTO_classification)
+    ) %>%
+  dplyr::rename(
+    Group = `Patient Group`
+    ) %>%
+  select(
+    Group, HTO_classification
+    ) %>%
+  distinct()
+
+mono.demul <- mono.singlet
+mono.demul@meta.data <- mono.demul@meta.data %>% 
+  left_join(., donorid)
+
+rownames(mono.demul@meta.data) <- rownames(mono.singlet@meta.data)
+mono <- mono.demul
+
+```
+
+```{r}
+rm(mono.singlet.donor, 
+   mono.singlet, 
+   mono.singlet.donor0.99, 
+   mono.hto)
+```
+
+# Quality control
+
+```{r MT}
+DefaultAssay(mono) <- "RNA"
+mono[["percent.mt"]] <- PercentageFeatureSet(mono, 
+                                             pattern = "^MT-")
+```
+
+```{r Visviolin}
+# plotting before nCount, nFeature, percent.mt QC
+DefaultAssay(mono) <- "RNA"
+
+# nFeature_RNA
+ggplot(mono@meta.data, aes(
+  x = nFeature_RNA)
+  ) + 
+  geom_histogram(binwidth = 50)
+
+ggplot(mono@meta.data, 
+       aes(x = nFeature_RNA)
+       ) + 
+  geom_histogram(binwidth = 50) +
+  facet_wrap( ~ donor_id)
+
+# nCount_RNA
+ggplot(mono@meta.data, 
+       aes(x = nCount_RNA)
+       ) + 
+  geom_histogram(binwidth = 50)
+
+ggplot(mono@meta.data, 
+       aes(x = nCount_RNA)
+       ) + 
+  geom_histogram(binwidth = 50) +
+  facet_wrap( ~ donor_id)
+
+# percent.mt
+ggplot(mono@meta.data, 
+       aes(x = percent.mt)
+       ) + geom_histogram(binwidth = 1)
+
+ggplot(mono@meta.data, 
+       aes(x = percent.mt)
+       ) + 
+  geom_histogram(binwidth = 1) +
+  facet_wrap( ~ donor_id)
+
+```
+
+```{r}
+# figuring out thresholds
+meta <- mono@meta.data
+
+# nFeature_RNA thresholds
+nF_thresholds <- meta %>%
+  group_by(orig.ident) %>%
+  summarise(
+    deadcell_nF_lowercutoff = quantile(nFeature_RNA, probs = 0.04),
+    deadcell_nF_uppercutoff = quantile(nFeature_RNA, probs = 0.99)
+  )
+
+# nCount_RNA threshold
+nC_thresholds <- meta %>%
+  group_by(orig.ident) %>%
+  summarise(
+    deadcell_nC_lowercutoff = quantile(nCount_RNA, probs = 0.04)
+  )
+
+# percent.mt threshold
+mt_thresholds <- meta %>%
+  group_by(orig.ident) %>%
+  summarise(
+    deadcell_mt_cutoff = quantile(percent.mt, probs = 0.94)
+  )
+```
+
+
+```{r}
+
+mono.meta <- mono@meta.data %>% 
+  mutate(is.dead = case_when(
+      nFeature_RNA >= nF_thresholds$deadcell_nF_lowercutoff & 
+        nFeature_RNA <= nF_thresholds$deadcell_nF_uppercutoff &
+        nCount_RNA >= nC_thresholds$deadcell_nC_lowercutoff &
+        percent.mt <= mt_thresholds$deadcell_mt_cutoff ~ "FALSE",
+      TRUE ~ "TRUE"))
+
+table(mono.meta$is.dead)
+
+ggplot(mono.meta, aes(x = nFeature_RNA, fill = factor(is.dead))) +
+  geom_histogram(bins = 50, position = "identity", alpha = 0.5) +
+  theme_bw()
+
+ggplot(mono.meta, aes(x = nCount_RNA, fill = factor(is.dead))) +
+  geom_histogram(bins = 50, position = "identity", alpha = 0.5) +
+  theme_bw()
+
+ggplot(mono.meta, aes(x = percent.mt, fill = factor(is.dead))) +
+  geom_histogram(bins = 50, position = "identity", alpha = 0.5) +
+  theme_bw()
+
+```
+
+```{r filtering}
+mono1 <- subset(mono, 
+                subset = nFeature_RNA > nF_thresholds$deadcell_nF_lowercutoff & 
+                  nFeature_RNA < nF_thresholds$deadcell_nF_uppercutoff & 
+                  percent.mt < mt_thresholds$deadcell_mt_cutoff & 
+                  nCount_RNA > nC_thresholds$deadcell_nC_lowercutoff)
+mono1
+VlnPlot(mono1, features=c("nCount_RNA", "nFeature_RNA", "percent.mt"), group.by = "orig.ident") 
+
+mono = mono1
+rm(mono1)
+```
+
+```{r save}
+#save.image("malaria_monocyte_QC.RData")
+```

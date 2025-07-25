@@ -1,0 +1,66 @@
+---
+title: "Single cell RNA-seq of Plasmodium sporozoite-infected monocytes - normalisation and clustering"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  toc: TRUE
+---
+
+```{r, echo = F}
+knitr::opts_chunk$set(warning = F, message = F)
+# knitr::opts_chunk$set(fig.pos = "!H", out.extra = "")
+#knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80),tidy=TRUE)
+
+```
+
+```{r mono.singlet}
+
+# Normalize data
+mono <- NormalizeData(mono)
+mono <- ScaleData(mono, features = VariableFeatures(mono))
+mono <- FindVariableFeatures(mono)
+mono <- RunPCA(mono, features = VariableFeatures(mono))
+
+ElbowPlot(mono)
+DimHeatmap(mono, dims = 1:5, cells = 1000, balanced = TRUE)
+```
+
+```{r}
+mono <- FindNeighbors(mono, reduction = "pca", dims = 1:20)
+mono <- FindClusters(mono, resolution = 0.8, verbose = FALSE)
+mono <- RunTSNE(mono, reduction = "pca", dims = 1:20)
+mono <- RunUMAP(mono, dims = 1:20)
+```
+
+```{r}
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(mono), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(mono)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+
+plot2
+
+```
+
+```{r}
+DimPlot(mono, group.by = "HTO_classification", reduction = "umap", label = "T")
+DimPlot(mono, group.by = "donor_id", reduction = "umap", label = "F")
+DimPlot(mono, group.by = "Group", reduction = "umap", label = "T")
+DimPlot(mono, group.by = "seurat_clusters",reduction = "umap", label = "T")
+
+table(mono@meta.data$Group)
+
+table(mono@meta.data$donor_id)
+```
+
+```{r}
+saveRDS(mono, file = paste0(lib_name, 
+                            "_nF_", 
+                            deadcell_nF_lowercutoff, "_",
+                            deadcell_nF_uppercutoff, "_nC_", 
+                            deadcell_nC_lowercutoff, "_cellbender.rds"))
+```
