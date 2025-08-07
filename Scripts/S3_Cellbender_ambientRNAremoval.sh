@@ -12,4 +12,4 @@ cellbender remove-background \
                  --output raw_feature_$lib\_out.h5
                  
 # From python with PyTables:
-# ptrepack --complevel 5 output raw_feature_$lib\_out.h5:/matrix output raw_feature_$lib\_out_seurat.h5:/matrix
+# ptrepack --complevel 5 raw_feature_$lib\_out.h5:/matrix raw_feature_$lib\_out_seurat.h5:/matrix
